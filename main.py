@@ -1,38 +1,59 @@
+import asyncio
+import json
 import os
 import re
-import json
+import tempfile
 import time
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
-from urllib.parse import quote_plus
 
-import requests
 import feedparser
+import requests
 from deep_translator import GoogleTranslator
+from telegram import Update
+from telegram.constants import ParseMode
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 # =========================
 # ENV
 # =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "").strip()
+
+# Public destination
+PUBLIC_CHANNEL_ID = os.getenv("PUBLIC_CHANNEL_ID", "").strip()  # example: @globaltechpulse
+
+# Private admin review group / channel
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "").strip())  # numeric chat id
+ADMIN_USER_IDS_RAW = os.getenv("ADMIN_USER_IDS", "").strip()  # example: 12345,67890
+ADMIN_USER_IDS = {
+    int(x.strip()) for x in ADMIN_USER_IDS_RAW.split(",") if x.strip().isdigit()
+}
 
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Dhaka").strip()
 POST_HOURS_RAW = os.getenv("POST_HOURS", "9,20").strip()
-MAX_POSTS_PER_SLOT = int(os.getenv("MAX_POSTS_PER_SLOT", "2"))
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))  # 5 min
+MAX_PENDING_PER_RUN = int(os.getenv("MAX_PENDING_PER_RUN", "3"))
 
-# Optional Facebook managed-page source
+# Optional Facebook page posting
+FB_ENABLE_PUBLISH = os.getenv("FB_ENABLE_PUBLISH", "false").strip().lower() == "true"
 FB_PAGE_ID = os.getenv("FB_PAGE_ID", "").strip()
 FB_PAGE_TOKEN = os.getenv("FB_PAGE_TOKEN", "").strip()
-FB_ENABLE_SOURCE = os.getenv("FB_ENABLE_SOURCE", "false").strip().lower() == "true"
-FB_MAX_ITEMS = int(os.getenv("FB_MAX_ITEMS", "4"))
 
 # Files
-POSTED_FILE = "posted_data.json"
-SCHEDULE_FILE = "schedule_state.json"
+DATA_DIR = Path(".")
+SEEN_FILE = DATA_DIR / "seen_items.json"
+QUEUE_FILE = DATA_DIR / "review_queue.json"
+STATE_FILE = DATA_DIR / "schedule_state.json"
 
 # =========================
-# NEWS FEEDS
+# SOURCES
 # =========================
 RSS_FEEDS = [
     ("Prothom Alo", "https://www.prothomalo.com/feed"),
@@ -74,6 +95,22 @@ BORING_KEYWORDS = [
 
 
 # =========================
+# FILE UTILS
+# =========================
+def load_json(path: Path, default):
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return default
+    return default
+
+
+def save_json(path: Path, data):
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# =========================
 # HELPERS
 # =========================
 def parse_post_hours(raw: str):
@@ -90,21 +127,6 @@ def parse_post_hours(raw: str):
 POST_HOURS = parse_post_hours(POST_HOURS_RAW)
 
 
-def load_json_file(path, default):
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return default
-    return default
-
-
-def save_json_file(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
 def strip_html(raw_text):
     text = re.sub(r"<.*?>", "", raw_text or "")
     text = text.replace("\n", " ").replace("\r", " ").replace("\t", " ").strip()
@@ -112,7 +134,7 @@ def strip_html(raw_text):
     return text
 
 
-def shorten_text(text, limit=260):
+def shorten_text(text, limit=320):
     text = (text or "").strip()
     if len(text) <= limit:
         return text
@@ -126,25 +148,24 @@ def normalize_text(text):
     return text
 
 
-def is_similar_news(new_title, old_titles):
+def contains_any(text, keywords):
+    text = (text or "").lower()
+    return any(word in text for word in keywords)
+
+
+def is_similar_title(new_title, seen_titles):
     new_norm = normalize_text(new_title)
-    for old in old_titles:
+    if not new_norm:
+        return False
+    for old in seen_titles:
         old_norm = normalize_text(old)
-        if not new_norm or not old_norm:
+        if not old_norm:
             continue
         if new_norm == old_norm or new_norm in old_norm or old_norm in new_norm:
             return True
     return False
 
 
-def contains_any(text, keywords):
-    text = (text or "").lower()
-    return any(word in text for word in keywords)
-
-
-# =========================
-# FILTERING
-# =========================
 def classify_news(title, summary, source_name):
     text = f"{title} {summary} {source_name}".lower()
 
@@ -152,7 +173,7 @@ def classify_news(title, summary, source_name):
         return "boring"
 
     if contains_any(text, BANGLADESH_KEYWORDS) or source_name in [
-        "Prothom Alo", "BDNews24", "Bangla Tribune", "The Daily Star", "Facebook Page"
+        "Prothom Alo", "BDNews24", "Bangla Tribune", "The Daily Star"
     ]:
         return "bangladesh"
 
@@ -166,7 +187,7 @@ def classify_news(title, summary, source_name):
 
 
 def is_valid_news(title, summary, source_name):
-    return classify_news(title, summary, source_name) in ["bangladesh", "world", "tech"]
+    return classify_news(title, summary, source_name) in {"bangladesh", "world", "tech"}
 
 
 def is_breaking_news(title, summary):
@@ -204,9 +225,6 @@ def score_news(title, summary, source_name):
     return score
 
 
-# =========================
-# BANGLA SUMMARY
-# =========================
 def to_bangla(text):
     text = (text or "").strip()
     if not text:
@@ -218,8 +236,8 @@ def to_bangla(text):
 
 
 def make_bangla_summary(title, summary, source_name):
-    base = f"{title}. {shorten_text(summary, 220)}"
-    translated = shorten_text(to_bangla(base), 280)
+    base = f"{title}. {shorten_text(summary, 260)}"
+    translated = shorten_text(to_bangla(base), 480)
     category = classify_news(title, summary, source_name)
 
     if category == "bangladesh":
@@ -232,13 +250,49 @@ def make_bangla_summary(title, summary, source_name):
     return f"{prefix} {translated}"
 
 
-# =========================
-# CAPTION
-# =========================
-def build_caption(title, summary, source_name, link):
-    title = strip_html(title)
-    summary = strip_html(summary)
-    source_name = strip_html(source_name)
+def build_pending_caption(item):
+    title = strip_html(item["title"])
+    summary = strip_html(item["summary"])
+    source_name = strip_html(item["source_name"])
+    link = item["link"]
+
+    if is_breaking_news(title, summary):
+        header = "🚨 PENDING: ব্রেকিং নিউজ"
+    else:
+        category = classify_news(title, summary, source_name)
+        if category == "bangladesh":
+            header = "🇧🇩 PENDING: বাংলাদেশ"
+        elif category == "world":
+            header = "🌍 PENDING: বিশ্ব"
+        else:
+            header = "📱 PENDING: Tech"
+
+    body = make_bangla_summary(title, summary, source_name)
+
+    return (
+        f"{header}\n\n"
+        f"ID: {item['id']}\n"
+        f"Title: {title}\n\n"
+        f"{body}\n\n"
+        f"Source: {source_name}\n"
+        f"{link}\n\n"
+        f"Commands:\n"
+        f"/approve {item['id']}\n"
+        f"/skip {item['id']}\n"
+        f"/editcaption {item['id']} | তোমার নতুন caption\n\n"
+        f"Edited photo/video attach করতে media send করে caption-এ দাও:\n"
+        f"/attach {item['id']}"
+    )
+
+
+def build_public_caption(item):
+    title = strip_html(item["title"])
+    summary = strip_html(item["summary"])
+    source_name = strip_html(item["source_name"])
+    link = item["link"]
+
+    if item.get("custom_caption"):
+        return item["custom_caption"]
 
     if is_breaking_news(title, summary):
         header = "🚨 ব্রেকিং নিউজ"
@@ -253,17 +307,29 @@ def build_caption(title, summary, source_name, link):
 
     return (
         f"{header}\n\n"
-        f"📰 {title}\n\n"
-        f"💡 বাংলা সারাংশ:\n{make_bangla_summary(title, summary, source_name)}\n\n"
-        f"🔗 Source: {source_name}\n{link}\n\n"
-        f"📢 আরও আপডেট পেতে join করুন: {CHANNEL_USERNAME}"
+        f"{title}\n\n"
+        f"{make_bangla_summary(title, summary, source_name)}\n\n"
+        f"Source: {source_name}\n"
+        f"{link}"
+    )
+
+
+def generate_reel_script(item):
+    title = strip_html(item["title"])
+    summary = strip_html(item["summary"])
+    short_summary = shorten_text(summary, 150)
+    return (
+        "🎥 REELS SCRIPT\n\n"
+        f"Hook:\nআজকের সবচেয়ে বড় খবর — {title}\n\n"
+        f"Body:\n{short_summary}\n\n"
+        f"CTA:\nআরও এমন আপডেট পেতে join করুন: {PUBLIC_CHANNEL_ID}"
     )
 
 
 # =========================
-# MEDIA
+# MEDIA EXTRACT
 # =========================
-def extract_image_from_entry(entry):
+def extract_image(entry):
     media_content = getattr(entry, "media_content", None)
     if media_content and isinstance(media_content, list):
         for item in media_content:
@@ -295,52 +361,14 @@ def extract_image_from_entry(entry):
 
 
 # =========================
-# TELEGRAM SEND
-# =========================
-def send_text_message(caption):
-    response = requests.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-        data={
-            "chat_id": CHANNEL_USERNAME,
-            "text": caption,
-            "disable_web_page_preview": False
-        },
-        timeout=60,
-    )
-    response.raise_for_status()
-
-
-def send_photo_message(photo_url, caption):
-    response = requests.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-        data={
-            "chat_id": CHANNEL_USERNAME,
-            "photo": photo_url,
-            "caption": caption[:1024]
-        },
-        timeout=60,
-    )
-    response.raise_for_status()
-
-
-def send_video_message(video_url, caption):
-    response = requests.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo",
-        data={
-            "chat_id": CHANNEL_USERNAME,
-            "video": video_url,
-            "caption": caption[:1024]
-        },
-        timeout=60,
-    )
-    response.raise_for_status()
-
-
-# =========================
 # RSS FETCH
 # =========================
-def fetch_rss_candidates(posted_links):
-    candidates = []
+def fetch_rss_candidates():
+    seen = load_json(SEEN_FILE, [])
+    seen_links = {x.get("link", "") for x in seen}
+    seen_titles = [x.get("title", "") for x in seen]
+
+    out = []
 
     for source_name, feed_url in RSS_FEEDS:
         try:
@@ -350,120 +378,32 @@ def fetch_rss_candidates(posted_links):
             continue
 
         entries = getattr(feed, "entries", [])
-        if not entries:
-            continue
-
         for entry in entries[:12]:
             title = getattr(entry, "title", "").strip()
             link = getattr(entry, "link", "").strip()
             raw_summary = getattr(entry, "summary", "") or getattr(entry, "description", "")
             summary = strip_html(raw_summary)
 
-            if not title or not link or link in posted_links:
+            if not title or not link:
                 continue
-
+            if link in seen_links:
+                continue
+            if is_similar_title(title, seen_titles):
+                continue
             if not is_valid_news(title, summary, source_name):
                 continue
 
-            candidates.append({
+            out.append({
                 "title": title,
-                "link": link,
                 "summary": summary if summary else "Latest update from the source.",
+                "link": link,
                 "source_name": source_name,
-                "image_url": extract_image_from_entry(entry),
-                "video_url": None,
+                "image_url": extract_image(entry),
                 "score": score_news(title, summary, source_name),
             })
 
-    return candidates
-
-
-# =========================
-# FACEBOOK MANAGED PAGE SOURCE
-# =========================
-def build_fb_post_permalink(page_id: str, post_id: str) -> str:
-    return f"https://www.facebook.com/{page_id}/posts/{post_id.split('_')[-1]}"
-
-
-def fetch_facebook_page_candidates(posted_links):
-    candidates = []
-
-    if not FB_ENABLE_SOURCE:
-        return candidates
-
-    if not FB_PAGE_ID or not FB_PAGE_TOKEN:
-        print("[FB SOURCE] Missing FB_PAGE_ID or FB_PAGE_TOKEN")
-        return candidates
-
-    # recent page posts
-    posts_url = (
-        f"https://graph.facebook.com/v25.0/{FB_PAGE_ID}/posts"
-        f"?fields=id,message,created_time,full_picture,attachments{{media_type,media,url,target,subattachments}}"
-        f"&limit={FB_MAX_ITEMS}&access_token={quote_plus(FB_PAGE_TOKEN)}"
-    )
-
-    try:
-        response = requests.get(posts_url, timeout=60)
-        response.raise_for_status()
-        data = response.json()
-    except Exception as e:
-        print(f"[FB SOURCE ERROR] posts fetch failed: {e}")
-        return candidates
-
-    for item in data.get("data", []):
-        post_id = item.get("id", "").strip()
-        message = strip_html(item.get("message", "") or "")
-        title = shorten_text(message.split(".")[0] if message else "Facebook Page Update", 120)
-        link = build_fb_post_permalink(FB_PAGE_ID, post_id) if post_id else ""
-
-        if not post_id or not link or link in posted_links:
-            continue
-
-        summary = message if message else "Facebook page থেকে নতুন আপডেট।"
-
-        if not is_valid_news(title, summary, "Facebook Page"):
-            continue
-
-        image_url = item.get("full_picture")
-        video_url = None
-
-        attachments = item.get("attachments", {}).get("data", [])
-        for att in attachments:
-            media_type = att.get("media_type", "")
-            media = att.get("media", {})
-            media_src = media.get("image", {}).get("src") if isinstance(media, dict) else None
-
-            if media_type in ["video_inline", "video_autoplay"]:
-                # Graph posts endpoint সাধারণত direct downloadable video URL দেয় না
-                # তাই আমরা link + image fallback রাখছি
-                video_url = None
-
-            if not image_url and media_src:
-                image_url = media_src
-
-        candidates.append({
-            "title": title,
-            "link": link,
-            "summary": summary,
-            "source_name": "Facebook Page",
-            "image_url": image_url,
-            "video_url": video_url,
-            "score": score_news(title, summary, "Facebook Page") + 2,
-        })
-
-    return candidates
-
-
-# =========================
-# COMBINED FETCH
-# =========================
-def fetch_candidates(posted_links):
-    rss_items = fetch_rss_candidates(posted_links)
-    fb_items = fetch_facebook_page_candidates(posted_links)
-
-    candidates = rss_items + fb_items
-    candidates.sort(key=lambda x: x["score"], reverse=True)
-    return candidates
+    out.sort(key=lambda x: x["score"], reverse=True)
+    return out[:MAX_PENDING_PER_RUN]
 
 
 # =========================
@@ -473,140 +413,391 @@ def get_slot_key(now_dt):
     return f"{now_dt.strftime('%Y-%m-%d')}_{now_dt.hour}"
 
 
-def should_post_now():
+def should_collect_now():
     now_dt = datetime.now(ZoneInfo(TIMEZONE))
     if now_dt.hour not in POST_HOURS:
         return False, now_dt, None
 
-    state = load_json_file(SCHEDULE_FILE, {})
+    state = load_json(STATE_FILE, {})
     slot_key = get_slot_key(now_dt)
 
-    if state.get("last_posted_slot") == slot_key:
+    if state.get("last_collect_slot") == slot_key:
         return False, now_dt, slot_key
 
     return True, now_dt, slot_key
 
 
-def mark_slot_posted(slot_key):
-    save_json_file(SCHEDULE_FILE, {"last_posted_slot": slot_key})
+def mark_collected(slot_key):
+    save_json(STATE_FILE, {"last_collect_slot": slot_key})
 
 
 # =========================
-# REELS SCRIPT
+# ADMIN PERMISSION
 # =========================
-def generate_reel_script(title, summary):
-    short_summary = shorten_text(strip_html(summary), 120)
-    return (
-        "🎥 REELS SCRIPT\n\n"
-        "Hook:\n"
-        f"আজকের সবচেয়ে বড় খবর — {title}\n\n"
-        "Body:\n"
-        f"{short_summary}\n\n"
-        "CTA:\n"
-        f"আরও এমন আপডেট পেতে Telegram channel join করুন: {CHANNEL_USERNAME}"
+def is_admin_user(user_id: int) -> bool:
+    if not ADMIN_USER_IDS:
+        return True
+    return user_id in ADMIN_USER_IDS
+
+
+# =========================
+# QUEUE
+# =========================
+def load_queue():
+    return load_json(QUEUE_FILE, [])
+
+
+def save_queue(queue):
+    save_json(QUEUE_FILE, queue)
+
+
+def next_pending_id(queue):
+    if not queue:
+        return 1
+    return max(item["id"] for item in queue) + 1
+
+
+def add_seen_item(item):
+    seen = load_json(SEEN_FILE, [])
+    seen.append({
+        "title": item["title"],
+        "link": item["link"],
+        "source_name": item["source_name"],
+        "saved_at": datetime.now(ZoneInfo(TIMEZONE)).isoformat()
+    })
+    save_json(SEEN_FILE, seen)
+
+
+# =========================
+# FACEBOOK PUBLISH
+# =========================
+def fb_post_text(message: str, link: str):
+    if not (FB_ENABLE_PUBLISH and FB_PAGE_ID and FB_PAGE_TOKEN):
+        return
+
+    url = f"https://graph.facebook.com/{FB_PAGE_ID}/feed"
+    payload = {
+        "message": message,
+        "link": link,
+        "access_token": FB_PAGE_TOKEN
+    }
+    requests.post(url, data=payload, timeout=60)
+
+
+def fb_post_photo(file_path: str, caption: str):
+    if not (FB_ENABLE_PUBLISH and FB_PAGE_ID and FB_PAGE_TOKEN):
+        return
+
+    url = f"https://graph.facebook.com/{FB_PAGE_ID}/photos"
+    with open(file_path, "rb") as f:
+        requests.post(
+            url,
+            data={"caption": caption, "access_token": FB_PAGE_TOKEN},
+            files={"source": f},
+            timeout=120
+        )
+
+
+def fb_post_video(file_path: str, caption: str):
+    if not (FB_ENABLE_PUBLISH and FB_PAGE_ID and FB_PAGE_TOKEN):
+        return
+
+    url = f"https://graph.facebook.com/{FB_PAGE_ID}/videos"
+    with open(file_path, "rb") as f:
+        requests.post(
+            url,
+            data={"description": caption, "access_token": FB_PAGE_TOKEN},
+            files={"source": f},
+            timeout=300
+        )
+
+
+# =========================
+# PUBLISH HELPERS
+# =========================
+async def publish_item(app: Application, item: dict):
+    bot = app.bot
+    caption = build_public_caption(item)
+
+    # priority 1: attached telegram media
+    if item.get("attached_type") and item.get("attached_file_id"):
+        if item["attached_type"] == "photo":
+            await bot.send_photo(chat_id=PUBLIC_CHANNEL_ID, photo=item["attached_file_id"], caption=caption[:1024])
+        elif item["attached_type"] == "video":
+            await bot.send_video(chat_id=PUBLIC_CHANNEL_ID, video=item["attached_file_id"], caption=caption[:1024])
+
+        # Facebook upload if possible: need local file download from Telegram
+        if FB_ENABLE_PUBLISH and item["attached_type"] in {"photo", "video"}:
+            tg_file = await bot.get_file(item["attached_file_id"])
+            suffix = ".jpg" if item["attached_type"] == "photo" else ".mp4"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp_path = tmp.name
+            await tg_file.download_to_drive(custom_path=tmp_path)
+
+            try:
+                if item["attached_type"] == "photo":
+                    fb_post_photo(tmp_path, caption)
+                else:
+                    fb_post_video(tmp_path, caption)
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+        return
+
+    # priority 2: feed image url
+    if item.get("image_url"):
+        await bot.send_photo(chat_id=PUBLIC_CHANNEL_ID, photo=item["image_url"], caption=caption[:1024])
+
+    else:
+        await bot.send_message(chat_id=PUBLIC_CHANNEL_ID, text=caption)
+
+    # FB fallback text+link
+    fb_post_text(caption, item["link"])
+
+
+# =========================
+# BOT COMMANDS
+# =========================
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin_user(update.effective_user.id):
+        return
+    await update.message.reply_text(
+        "Bot ready.\n\n"
+        "Commands:\n"
+        "/status\n"
+        "/approve ID\n"
+        "/skip ID\n"
+        "/editcaption ID | নতুন caption\n\n"
+        "Edited media attach:\n"
+        "photo/video send করে caption-এ লিখো:\n"
+        "/attach ID"
     )
 
 
-# =========================
-# POST
-# =========================
-def post_news_smart():
-    posted_data = load_json_file(POSTED_FILE, [])
-    posted_links = {item.get("link", "") for item in posted_data}
-    posted_titles = [item.get("title", "") for item in posted_data]
-
-    candidates = fetch_candidates(posted_links)
-    unique_candidates = []
-
-    for item in candidates:
-        if is_similar_news(item["title"], posted_titles):
-            print(f"[SKIPPED SIMILAR] {item['title']}")
-            continue
-        unique_candidates.append(item)
-
-    if not unique_candidates:
-        print("[INFO] No new unique news found.")
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin_user(update.effective_user.id):
         return
 
-    posted_count = 0
+    queue = load_queue()
+    pending = [x for x in queue if x["status"] == "pending"]
+    approved = [x for x in queue if x["status"] == "approved"]
+    skipped = [x for x in queue if x["status"] == "skipped"]
 
-    for item in unique_candidates:
-        if posted_count >= MAX_POSTS_PER_SLOT:
-            break
+    await update.message.reply_text(
+        f"Queue status:\n"
+        f"Pending: {len(pending)}\n"
+        f"Approved: {len(approved)}\n"
+        f"Skipped: {len(skipped)}"
+    )
 
-        caption = build_caption(
-            item["title"],
-            item["summary"],
-            item["source_name"],
-            item["link"]
-        )
 
+async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin_user(update.effective_user.id):
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Use: /approve 12")
+        return
+
+    item_id = int(context.args[0])
+    queue = load_queue()
+
+    item = next((x for x in queue if x["id"] == item_id and x["status"] == "pending"), None)
+    if not item:
+        await update.message.reply_text("Pending item not found.")
+        return
+
+    try:
+        await publish_item(context.application, item)
+        item["status"] = "approved"
+        item["approved_at"] = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
+        save_queue(queue)
+        add_seen_item(item)
+
+        await update.message.reply_text(f"Approved and posted: {item_id}")
+
+        reel = generate_reel_script(item)
+        await update.message.reply_text(reel)
+    except Exception as e:
+        await update.message.reply_text(f"Approve failed: {e}")
+
+
+async def skip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin_user(update.effective_user.id):
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Use: /skip 12")
+        return
+
+    item_id = int(context.args[0])
+    queue = load_queue()
+
+    item = next((x for x in queue if x["id"] == item_id and x["status"] == "pending"), None)
+    if not item:
+        await update.message.reply_text("Pending item not found.")
+        return
+
+    item["status"] = "skipped"
+    item["skipped_at"] = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
+    save_queue(queue)
+    add_seen_item(item)
+
+    await update.message.reply_text(f"Skipped: {item_id}")
+
+
+async def editcaption_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin_user(update.effective_user.id):
+        return
+
+    raw = update.message.text or ""
+    # format: /editcaption 12 | your new caption
+    m = re.match(r"^/editcaption\s+(\d+)\s*\|\s*(.+)$", raw, flags=re.DOTALL)
+    if not m:
+        await update.message.reply_text("Use: /editcaption 12 | তোমার নতুন caption")
+        return
+
+    item_id = int(m.group(1))
+    new_caption = m.group(2).strip()
+
+    queue = load_queue()
+    item = next((x for x in queue if x["id"] == item_id and x["status"] == "pending"), None)
+    if not item:
+        await update.message.reply_text("Pending item not found.")
+        return
+
+    item["custom_caption"] = new_caption
+    save_queue(queue)
+    await update.message.reply_text(f"Caption updated for ID {item_id}")
+
+
+async def media_attach_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin_user(update.effective_user.id):
+        return
+    if not update.message:
+        return
+
+    caption = update.message.caption or ""
+    m = re.match(r"^/attach\s+(\d+)$", caption.strip())
+    if not m:
+        return
+
+    item_id = int(m.group(1))
+    queue = load_queue()
+    item = next((x for x in queue if x["id"] == item_id and x["status"] == "pending"), None)
+    if not item:
+        await update.message.reply_text("Pending item not found for attach.")
+        return
+
+    if update.message.video:
+        item["attached_type"] = "video"
+        item["attached_file_id"] = update.message.video.file_id
+    elif update.message.photo:
+        item["attached_type"] = "photo"
+        item["attached_file_id"] = update.message.photo[-1].file_id
+    else:
+        await update.message.reply_text("Send photo/video with caption: /attach ID")
+        return
+
+    save_queue(queue)
+    await update.message.reply_text(f"Media attached for ID {item_id}")
+
+
+# =========================
+# COLLECTOR TASK
+# =========================
+async def collector_loop(app: Application):
+    await asyncio.sleep(5)
+
+    while True:
         try:
-            if item["video_url"]:
-                send_video_message(item["video_url"], caption)
-                print(f"[VIDEO POSTED] {item['title']}")
-            elif item["image_url"]:
-                send_photo_message(item["image_url"], caption)
-                print(f"[PHOTO POSTED] {item['title']}")
+            can_collect, now_dt, slot_key = should_collect_now()
+            print(f"[CHECK] {now_dt}")
+
+            if can_collect and slot_key:
+                print(f"[COLLECT] {slot_key}")
+                candidates = fetch_rss_candidates()
+
+                if candidates:
+                    queue = load_queue()
+                    current_pending_titles = [x["title"] for x in queue if x["status"] == "pending"]
+
+                    added = 0
+                    for cand in candidates:
+                        if is_similar_title(cand["title"], current_pending_titles):
+                            continue
+
+                        cand["id"] = next_pending_id(queue)
+                        cand["status"] = "pending"
+                        cand["created_at"] = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
+                        cand["attached_type"] = None
+                        cand["attached_file_id"] = None
+                        cand["custom_caption"] = None
+
+                        queue.append(cand)
+                        save_queue(queue)
+
+                        text = build_pending_caption(cand)
+                        if cand.get("image_url"):
+                            await app.bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=cand["image_url"], caption=text[:1024])
+                        else:
+                            await app.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
+
+                        added += 1
+
+                    print(f"[COLLECTED] {added} new pending items")
+                else:
+                    print("[COLLECTED] no new items")
+
+                mark_collected(slot_key)
             else:
-                send_text_message(caption)
-                print(f"[TEXT POSTED] {item['title']}")
-
-            reel_script = generate_reel_script(item["title"], item["summary"])
-            print(reel_script)
-
-            posted_data.append({
-                "title": item["title"],
-                "link": item["link"],
-                "source": item["source_name"],
-                "posted_at": datetime.now(ZoneInfo(TIMEZONE)).isoformat()
-            })
-            save_json_file(POSTED_FILE, posted_data)
-
-            posted_count += 1
-            time.sleep(4)
+                print("[WAIT] not collection window")
 
         except Exception as e:
-            print(f"[ERROR] Failed to post '{item['title']}': {e}")
+            print(f"[COLLECTOR ERROR] {e}")
 
-    print(f"[DONE] Posted {posted_count} item(s).")
+        await asyncio.sleep(CHECK_INTERVAL)
 
 
 # =========================
 # MAIN
 # =========================
+async def post_init(app: Application):
+    app.create_task(collector_loop(app))
+
+
 def main():
     if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN environment variable is missing.")
-    if not CHANNEL_USERNAME:
-        raise ValueError("CHANNEL_USERNAME environment variable is missing.")
+        raise ValueError("BOT_TOKEN is missing")
+    if not PUBLIC_CHANNEL_ID:
+        raise ValueError("PUBLIC_CHANNEL_ID is missing")
+    if not ADMIN_CHAT_ID:
+        raise ValueError("ADMIN_CHAT_ID is missing")
 
     print("===================================")
-    print("Bot started successfully...")
-    print(f"Channel: {CHANNEL_USERNAME}")
-    print(f"Timezone: {TIMEZONE}")
+    print("Bot starting...")
+    print(f"Public Channel: {PUBLIC_CHANNEL_ID}")
+    print(f"Admin Chat ID: {ADMIN_CHAT_ID}")
     print(f"Post hours: {POST_HOURS}")
-    print(f"Max posts per slot: {MAX_POSTS_PER_SLOT}")
-    print(f"Check interval: {CHECK_INTERVAL} seconds")
-    print(f"Facebook managed-page source enabled: {FB_ENABLE_SOURCE}")
+    print(f"Check interval: {CHECK_INTERVAL}")
+    print(f"Facebook publish enabled: {FB_ENABLE_PUBLISH}")
     print("===================================")
 
-    while True:
-        try:
-            can_post, now_dt, slot_key = should_post_now()
-            print(f"[CHECK] Now: {now_dt}")
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
-            if can_post and slot_key:
-                print(f"[POST WINDOW] Running scheduled posts for slot {slot_key}")
-                post_news_smart()
-                mark_slot_posted(slot_key)
-            else:
-                print("[WAIT] Not posting now or already posted in this slot.")
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("approve", approve_cmd))
+    app.add_handler(CommandHandler("skip", skip_cmd))
+    app.add_handler(CommandHandler("editcaption", editcaption_cmd))
+    app.add_handler(
+        MessageHandler((filters.PHOTO | filters.VIDEO) & filters.Caption(True), media_attach_handler)
+    )
 
-        except Exception as e:
-            print(f"[LOOP ERROR] {e}")
-
-        time.sleep(CHECK_INTERVAL)
+    app.run_polling()
 
 
 if __name__ == "__main__":
