@@ -33,7 +33,7 @@ ADMIN_USER_IDS = {
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Dhaka").strip()
 POST_HOURS_RAW = os.getenv("POST_HOURS", "9,20").strip()
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
-MAX_PENDING_PER_RUN = int(os.getenv("MAX_PENDING_PER_RUN", "3"))
+MAX_PENDING_PER_RUN = int(os.getenv("MAX_PENDING_PER_RUN", "5"))
 
 FB_ENABLE_PUBLISH = os.getenv("FB_ENABLE_PUBLISH", "false").strip().lower() == "true"
 FB_PAGE_ID = os.getenv("FB_PAGE_ID", "").strip()
@@ -82,7 +82,6 @@ BORING_KEYWORDS = [
     "subscribe now", "investor presentation", "earnings call",
     "quarterly report", "shareholder", "promo"
 ]
-
 
 # =========================
 # FILE HELPERS
@@ -330,7 +329,11 @@ def generate_reel_script(item):
 # SOURCES
 # =========================
 def load_sources():
-    return load_json(SOURCES_FILE, DEFAULT_RSS_FEEDS.copy())
+    existing = load_json(SOURCES_FILE, None)
+    if existing is None:
+        save_json(SOURCES_FILE, DEFAULT_RSS_FEEDS.copy())
+        return DEFAULT_RSS_FEEDS.copy()
+    return existing
 
 
 def save_sources(sources):
@@ -570,7 +573,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "pending post-এ reply করে media send করো\n\n"
         "Source commands:\n"
         "/addsource Name | RSS_URL\n"
-        "/listsources"
+        "/listsources\n"
+        "/fetchnow"
     )
 
 
@@ -693,6 +697,15 @@ async def listsources_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+async def fetchnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin_user(update.effective_user.id):
+        return
+
+    await update.message.reply_text("Fetching now...")
+    added = await collect_now(context.application)
+    await update.message.reply_text(f"Fetch done. Added: {added}")
+
+
 async def media_attach_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not is_admin_user(update.effective_user.id):
         return
@@ -720,8 +733,29 @@ async def media_attach_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # =========================
-# SCHEDULER
+# COLLECT
 # =========================
+async def collect_now(app: Application):
+    candidates = fetch_rss_candidates()
+    queue = load_queue()
+    added = 0
+
+    for cand in candidates:
+        text = build_pending_caption(cand)
+
+        if cand.get("image_url"):
+            sent = await app.bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=cand["image_url"], caption=text[:1024])
+        else:
+            sent = await app.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
+
+        cand["admin_message_id"] = sent.message_id
+        queue.append(cand)
+        added += 1
+
+    save_queue(queue)
+    return added
+
+
 def get_slot_key(now_dt):
     return f"{now_dt.strftime('%Y-%m-%d')}_{now_dt.hour}"
 
@@ -753,23 +787,7 @@ async def collector_loop(app: Application):
             print(f"[CHECK] {now_dt}")
 
             if can_collect and slot_key:
-                candidates = fetch_rss_candidates()
-                queue = load_queue()
-                added = 0
-
-                for cand in candidates:
-                    text = build_pending_caption(cand)
-
-                    if cand.get("image_url"):
-                        sent = await app.bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=cand["image_url"], caption=text[:1024])
-                    else:
-                        sent = await app.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
-
-                    cand["admin_message_id"] = sent.message_id
-                    queue.append(cand)
-                    added += 1
-
-                save_queue(queue)
+                added = await collect_now(app)
                 mark_collected(slot_key)
                 print(f"[COLLECTED] {added}")
             else:
@@ -812,6 +830,7 @@ def main():
     app.add_handler(CommandHandler("editcaption", editcaption_cmd))
     app.add_handler(CommandHandler("addsource", addsource_cmd))
     app.add_handler(CommandHandler("listsources", listsources_cmd))
+    app.add_handler(CommandHandler("fetchnow", fetchnow_cmd))
     app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO), media_attach_handler))
 
     app.run_polling()
