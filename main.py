@@ -4,6 +4,7 @@ import json
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from urllib.parse import quote_plus
 
 import requests
 import feedparser
@@ -14,32 +15,32 @@ from deep_translator import GoogleTranslator
 # =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "").strip()
+
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Dhaka").strip()
 POST_HOURS_RAW = os.getenv("POST_HOURS", "9,20").strip()
 MAX_POSTS_PER_SLOT = int(os.getenv("MAX_POSTS_PER_SLOT", "2"))
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
 
-# =========================
-# FILES
-# =========================
+# Optional Facebook managed-page source
+FB_PAGE_ID = os.getenv("FB_PAGE_ID", "").strip()
+FB_PAGE_TOKEN = os.getenv("FB_PAGE_TOKEN", "").strip()
+FB_ENABLE_SOURCE = os.getenv("FB_ENABLE_SOURCE", "false").strip().lower() == "true"
+FB_MAX_ITEMS = int(os.getenv("FB_MAX_ITEMS", "4"))
+
+# Files
 POSTED_FILE = "posted_data.json"
 SCHEDULE_FILE = "schedule_state.json"
 
 # =========================
-# FEEDS
+# NEWS FEEDS
 # =========================
 RSS_FEEDS = [
-    # Bangladesh
     ("Prothom Alo", "https://www.prothomalo.com/feed"),
     ("BDNews24", "https://bdnews24.com/feed/"),
     ("Bangla Tribune", "https://banglatribune.com/feed/"),
     ("The Daily Star", "https://www.thedailystar.net/frontpage/rss.xml"),
-
-    # World / important
     ("BBC World", "https://feeds.bbci.co.uk/news/world/rss.xml"),
     ("BBC Technology", "https://feeds.bbci.co.uk/news/technology/rss.xml"),
-
-    # Tech / gadget / AI
     ("TechCrunch", "https://techcrunch.com/feed/"),
     ("The Verge", "https://www.theverge.com/rss/index.xml"),
 ]
@@ -70,6 +71,7 @@ BORING_KEYWORDS = [
     "subscribe now", "investor presentation", "earnings call",
     "quarterly report", "shareholder", "promo"
 ]
+
 
 # =========================
 # HELPERS
@@ -139,6 +141,7 @@ def contains_any(text, keywords):
     text = (text or "").lower()
     return any(word in text for word in keywords)
 
+
 # =========================
 # FILTERING
 # =========================
@@ -149,7 +152,7 @@ def classify_news(title, summary, source_name):
         return "boring"
 
     if contains_any(text, BANGLADESH_KEYWORDS) or source_name in [
-        "Prothom Alo", "BDNews24", "Bangla Tribune", "The Daily Star"
+        "Prothom Alo", "BDNews24", "Bangla Tribune", "The Daily Star", "Facebook Page"
     ]:
         return "bangladesh"
 
@@ -200,6 +203,7 @@ def score_news(title, summary, source_name):
 
     return score
 
+
 # =========================
 # BANGLA SUMMARY
 # =========================
@@ -226,6 +230,7 @@ def make_bangla_summary(title, summary, source_name):
         prefix = "টেক আপডেট:"
 
     return f"{prefix} {translated}"
+
 
 # =========================
 # CAPTION
@@ -254,10 +259,11 @@ def build_caption(title, summary, source_name, link):
         f"📢 আরও আপডেট পেতে join করুন: {CHANNEL_USERNAME}"
     )
 
+
 # =========================
 # MEDIA
 # =========================
-def extract_image(entry):
+def extract_image_from_entry(entry):
     media_content = getattr(entry, "media_content", None)
     if media_content and isinstance(media_content, list):
         for item in media_content:
@@ -287,6 +293,7 @@ def extract_image(entry):
 
     return None
 
+
 # =========================
 # TELEGRAM SEND
 # =========================
@@ -315,10 +322,24 @@ def send_photo_message(photo_url, caption):
     )
     response.raise_for_status()
 
+
+def send_video_message(video_url, caption):
+    response = requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo",
+        data={
+            "chat_id": CHANNEL_USERNAME,
+            "video": video_url,
+            "caption": caption[:1024]
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+
+
 # =========================
-# FETCH
+# RSS FETCH
 # =========================
-def fetch_candidates(posted_links):
+def fetch_rss_candidates(posted_links):
     candidates = []
 
     for source_name, feed_url in RSS_FEEDS:
@@ -349,12 +370,101 @@ def fetch_candidates(posted_links):
                 "link": link,
                 "summary": summary if summary else "Latest update from the source.",
                 "source_name": source_name,
-                "image_url": extract_image(entry),
+                "image_url": extract_image_from_entry(entry),
+                "video_url": None,
                 "score": score_news(title, summary, source_name),
             })
 
+    return candidates
+
+
+# =========================
+# FACEBOOK MANAGED PAGE SOURCE
+# =========================
+def build_fb_post_permalink(page_id: str, post_id: str) -> str:
+    return f"https://www.facebook.com/{page_id}/posts/{post_id.split('_')[-1]}"
+
+
+def fetch_facebook_page_candidates(posted_links):
+    candidates = []
+
+    if not FB_ENABLE_SOURCE:
+        return candidates
+
+    if not FB_PAGE_ID or not FB_PAGE_TOKEN:
+        print("[FB SOURCE] Missing FB_PAGE_ID or FB_PAGE_TOKEN")
+        return candidates
+
+    # recent page posts
+    posts_url = (
+        f"https://graph.facebook.com/v25.0/{FB_PAGE_ID}/posts"
+        f"?fields=id,message,created_time,full_picture,attachments{{media_type,media,url,target,subattachments}}"
+        f"&limit={FB_MAX_ITEMS}&access_token={quote_plus(FB_PAGE_TOKEN)}"
+    )
+
+    try:
+        response = requests.get(posts_url, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        print(f"[FB SOURCE ERROR] posts fetch failed: {e}")
+        return candidates
+
+    for item in data.get("data", []):
+        post_id = item.get("id", "").strip()
+        message = strip_html(item.get("message", "") or "")
+        title = shorten_text(message.split(".")[0] if message else "Facebook Page Update", 120)
+        link = build_fb_post_permalink(FB_PAGE_ID, post_id) if post_id else ""
+
+        if not post_id or not link or link in posted_links:
+            continue
+
+        summary = message if message else "Facebook page থেকে নতুন আপডেট।"
+
+        if not is_valid_news(title, summary, "Facebook Page"):
+            continue
+
+        image_url = item.get("full_picture")
+        video_url = None
+
+        attachments = item.get("attachments", {}).get("data", [])
+        for att in attachments:
+            media_type = att.get("media_type", "")
+            media = att.get("media", {})
+            media_src = media.get("image", {}).get("src") if isinstance(media, dict) else None
+
+            if media_type in ["video_inline", "video_autoplay"]:
+                # Graph posts endpoint সাধারণত direct downloadable video URL দেয় না
+                # তাই আমরা link + image fallback রাখছি
+                video_url = None
+
+            if not image_url and media_src:
+                image_url = media_src
+
+        candidates.append({
+            "title": title,
+            "link": link,
+            "summary": summary,
+            "source_name": "Facebook Page",
+            "image_url": image_url,
+            "video_url": video_url,
+            "score": score_news(title, summary, "Facebook Page") + 2,
+        })
+
+    return candidates
+
+
+# =========================
+# COMBINED FETCH
+# =========================
+def fetch_candidates(posted_links):
+    rss_items = fetch_rss_candidates(posted_links)
+    fb_items = fetch_facebook_page_candidates(posted_links)
+
+    candidates = rss_items + fb_items
     candidates.sort(key=lambda x: x["score"], reverse=True)
     return candidates
+
 
 # =========================
 # SCHEDULE
@@ -380,6 +490,7 @@ def should_post_now():
 def mark_slot_posted(slot_key):
     save_json_file(SCHEDULE_FILE, {"last_posted_slot": slot_key})
 
+
 # =========================
 # REELS SCRIPT
 # =========================
@@ -394,6 +505,7 @@ def generate_reel_script(title, summary):
         "CTA:\n"
         f"আরও এমন আপডেট পেতে Telegram channel join করুন: {CHANNEL_USERNAME}"
     )
+
 
 # =========================
 # POST
@@ -430,7 +542,10 @@ def post_news_smart():
         )
 
         try:
-            if item["image_url"]:
+            if item["video_url"]:
+                send_video_message(item["video_url"], caption)
+                print(f"[VIDEO POSTED] {item['title']}")
+            elif item["image_url"]:
                 send_photo_message(item["image_url"], caption)
                 print(f"[PHOTO POSTED] {item['title']}")
             else:
@@ -456,6 +571,7 @@ def post_news_smart():
 
     print(f"[DONE] Posted {posted_count} item(s).")
 
+
 # =========================
 # MAIN
 # =========================
@@ -472,6 +588,7 @@ def main():
     print(f"Post hours: {POST_HOURS}")
     print(f"Max posts per slot: {MAX_POSTS_PER_SLOT}")
     print(f"Check interval: {CHECK_INTERVAL} seconds")
+    print(f"Facebook managed-page source enabled: {FB_ENABLE_SOURCE}")
     print("===================================")
 
     while True:
