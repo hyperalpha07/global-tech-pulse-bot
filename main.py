@@ -46,6 +46,19 @@ FB_ENABLE_PUBLISH = os.getenv("FB_ENABLE_PUBLISH", "false").strip().lower() == "
 FB_PAGE_ID = os.getenv("FB_PAGE_ID", "").strip()
 FB_PAGE_TOKEN = os.getenv("FB_PAGE_TOKEN", "").strip()
 
+# Facebook source fetch
+FB_ENABLE_SOURCE = os.getenv("FB_ENABLE_SOURCE", "false").strip().lower() == "true"
+FB_SOURCE_PAGE_IDS_RAW = os.getenv("FB_SOURCE_PAGE_IDS", "").strip()
+FB_SOURCE_PAGE_IDS = [x.strip() for x in FB_SOURCE_PAGE_IDS_RAW.split(",") if x.strip()]
+FB_MAX_ITEMS = int(os.getenv("FB_MAX_ITEMS", "5"))
+
+# Telegram promo / branding
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "").strip()  # example: @GlobalTechPulse
+CHANNEL_JOIN_TEXT = os.getenv(
+    "CHANNEL_JOIN_TEXT",
+    "📢 আরও full summary ও দ্রুত আপডেট পেতে join করুন:"
+).strip()
+
 DATA_DIR = Path(".")
 SEEN_FILE = DATA_DIR / "seen_items.json"
 QUEUE_FILE = DATA_DIR / "review_queue.json"
@@ -75,9 +88,6 @@ DEFAULT_SOURCES = [
     {"name": "DW News YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCknLrEdhRCp1aegoMqRaCZg", "type": "feed", "mode": "auto"},
     {"name": "Jamuna TV YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCN6sm8iHiPd0cnoUardDAnA", "type": "feed", "mode": "auto"},
     {"name": "Somoy TV YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCxHoBXkY88Tb8z1Ssj6CWsQ", "type": "feed", "mode": "auto"},
-
-    # Example Facebook review source
-    # {"name": "Facebook Page 1", "url": "https://REAL-FACEBOOK-FEED-OR-BRIDGE-URL", "type": "feed", "mode": "review"},
 ]
 
 BANGLADESH_KEYWORDS = [
@@ -111,6 +121,7 @@ BORING_KEYWORDS = [
     "subscribe now", "investor presentation", "earnings call",
     "quarterly report", "shareholder", "promo", "podcast", "livestream"
 ]
+
 
 # =========================================================
 # JSON HELPERS
@@ -187,6 +198,12 @@ def source_slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-") or "source"
 
 
+def get_join_footer():
+    if CHANNEL_USERNAME:
+        return f"{CHANNEL_JOIN_TEXT}\n{CHANNEL_USERNAME}"
+    return ""
+
+
 # =========================================================
 # SOURCES
 # =========================================================
@@ -243,13 +260,10 @@ def mark_source_result(source_name: str, ok: bool, error: str = ""):
             else:
                 src["fail_count"] = int(src.get("fail_count", 0)) + 1
                 src["last_error"] = error[:500]
-
                 if "your-facebook-feed-or-bridge-url" in src.get("url", ""):
                     src["enabled"] = False
-
                 if src["fail_count"] >= 10:
                     src["enabled"] = False
-
             updated = True
             break
 
@@ -390,10 +404,8 @@ def is_similar_title(new_title, seen_titles):
         old_norm = normalize_text(old)
         if not old_norm:
             continue
-
         if new_norm == old_norm or new_norm in old_norm or old_norm in new_norm:
             return True
-
     return False
 
 
@@ -422,7 +434,6 @@ def make_english_summary(title, summary):
 
     parts = re.split(r"(?<=[.!?])\s+", text)
     useful_parts = []
-
     for p in parts:
         p = p.strip()
         if not p:
@@ -430,19 +441,18 @@ def make_english_summary(title, summary):
         if len(p) < 25:
             continue
         useful_parts.append(p)
-
-        if len(" ".join(useful_parts)) >= 500:
+        if len(" ".join(useful_parts)) >= 700:
             break
 
     if not useful_parts:
-        return shorten_text(text, 500)
+        return shorten_text(text, 700)
 
-    return shorten_text(" ".join(useful_parts), 500)
+    return shorten_text(" ".join(useful_parts), 700)
 
 
 def make_bangla_summary(title, summary, source_name):
     english = make_english_summary(title, summary)
-    translated = shorten_text(to_bangla(english), 900)
+    translated = shorten_text(to_bangla(english), 1200)
     category = classify_news(title, summary, source_name)
 
     if category == "bangladesh":
@@ -493,7 +503,9 @@ def build_pending_caption(item):
 
 def build_public_caption(item):
     if item.get("custom_caption"):
-        return item["custom_caption"]
+        caption = item["custom_caption"].strip()
+        footer = get_join_footer()
+        return f"{caption}\n\n{footer}".strip() if footer else caption
 
     title = strip_html(item["title"])
     summary = strip_html(item["summary"])
@@ -512,13 +524,22 @@ def build_public_caption(item):
         else:
             header = "📱 AI / Gadget / Tech Update"
 
-    return (
-        f"{header}\n\n"
-        f"{title}\n\n"
-        f"{bangla_summary}\n\n"
-        f"🌐 Source: {source_name}\n"
-        f"🔗 {link}"
-    )
+    parts = [
+        header,
+        "",
+        title,
+        "",
+        bangla_summary,
+        "",
+        f"🌐 Source: {source_name}",
+        f"🔗 {link}",
+    ]
+
+    footer = get_join_footer()
+    if footer:
+        parts.extend(["", footer])
+
+    return "\n".join(parts)
 
 
 def generate_reel_script(item):
@@ -530,7 +551,7 @@ def generate_reel_script(item):
         "🎥 REELS SCRIPT\n\n"
         f"Hook:\nআজকের সবচেয়ে বড় খবর — {title}\n\n"
         f"Body:\n{short_summary}\n\n"
-        f"CTA:\nআরও এমন আপডেট পেতে follow করুন।"
+        f"CTA:\nআরও full summary পেতে channel follow করুন।"
     )
 
 
@@ -554,7 +575,6 @@ def format_approved_list(items):
 
     latest = list(reversed(items))[:20]
     lines = ["✅ Approved items:\n"]
-
     for idx, item in enumerate(latest, start=1):
         title = shorten_text(strip_html(item.get("title", "")), 90)
         source = strip_html(item.get("source_name", "Unknown"))
@@ -565,7 +585,7 @@ def format_approved_list(items):
 
 
 # =========================================================
-# MEDIA
+# MEDIA HELPERS
 # =========================================================
 def extract_image(entry):
     media_content = getattr(entry, "media_content", None)
@@ -598,15 +618,37 @@ def extract_image(entry):
     return None
 
 
+def extract_video_url(entry):
+    media_content = getattr(entry, "media_content", None)
+    if media_content and isinstance(media_content, list):
+        for item in media_content:
+            media_url = item.get("url")
+            media_type = item.get("type", "")
+            if media_url and str(media_type).startswith("video/"):
+                return media_url
+
+    links = getattr(entry, "links", [])
+    for item in links:
+        href = item.get("href")
+        media_type = item.get("type", "")
+        if href and str(media_type).startswith("video/"):
+            return href
+
+    return None
+
+
+def is_probably_video_link(link: str):
+    link = (link or "").lower()
+    return any(x in link for x in [".mp4", ".mov", ".m4v", ".webm"])
+
+
 # =========================================================
 # FEED FETCH
 # =========================================================
 def fetch_feed_entries(source_name: str, source_url: str):
-    headers = {"User-Agent": "Mozilla/5.0 NewsBot/2.0"}
-
+    headers = {"User-Agent": "Mozilla/5.0 NewsBot/3.0"}
     response = requests.get(source_url, timeout=25, headers=headers)
     response.raise_for_status()
-
     parsed = feedparser.parse(response.content)
     return getattr(parsed, "entries", [])
 
@@ -630,7 +672,7 @@ def source_requires_review(source: dict, title: str, summary: str):
     return False
 
 
-def fetch_candidates():
+def fetch_rss_candidates():
     seen = load_seen()
     seen_links = {x.get("link", "") for x in seen}
     seen_titles = [x.get("title", "") for x in seen]
@@ -692,12 +734,16 @@ def fetch_candidates():
             if not is_valid_news(title, summary, source_name):
                 continue
 
+            image_url = extract_image(entry)
+            video_url = extract_video_url(entry)
+
             out.append({
                 "title": title,
                 "summary": summary if summary else "Latest update from the source.",
                 "link": link,
                 "source_name": source_name,
-                "image_url": extract_image(entry),
+                "image_url": image_url,
+                "video_url": video_url,
                 "score": score_news(title, summary, source_name),
                 "status": "pending",
                 "custom_caption": None,
@@ -711,32 +757,184 @@ def fetch_candidates():
                 "skipped_at": None,
             })
 
-    out.sort(key=lambda x: x["score"], reverse=True)
-    return out[:MAX_PENDING_PER_RUN], debug_errors
+    return out, debug_errors
 
 
 # =========================================================
-# FB PUBLISH
+# FACEBOOK SOURCE FETCH (GRAPH API)
+# =========================================================
+def fetch_facebook_source_candidates():
+    out = []
+    debug_errors = []
+
+    if not FB_ENABLE_SOURCE:
+        return out, debug_errors
+
+    if not FB_PAGE_TOKEN:
+        debug_errors.append("Facebook source enabled but FB_PAGE_TOKEN missing")
+        return out, debug_errors
+
+    if not FB_SOURCE_PAGE_IDS:
+        debug_errors.append("Facebook source enabled but FB_SOURCE_PAGE_IDS missing")
+        return out, debug_errors
+
+    seen = load_seen()
+    seen_links = {x.get("link", "") for x in seen}
+    seen_titles = [x.get("title", "") for x in seen]
+
+    queue = load_queue()
+    pending_titles = [x.get("title", "") for x in queue if x.get("status") == "pending"]
+    pending_links = {x.get("link", "") for x in queue if x.get("status") == "pending"}
+
+    for page_id in FB_SOURCE_PAGE_IDS:
+        try:
+            page_name_url = f"https://graph.facebook.com/v25.0/{page_id}"
+            page_resp = requests.get(
+                page_name_url,
+                params={
+                    "fields": "name",
+                    "access_token": FB_PAGE_TOKEN,
+                },
+                timeout=30,
+            )
+            page_resp.raise_for_status()
+            page_name = page_resp.json().get("name", f"Facebook Page {page_id}")
+
+            posts_url = f"https://graph.facebook.com/v25.0/{page_id}/posts"
+            fields = ",".join([
+                "id",
+                "message",
+                "story",
+                "created_time",
+                "permalink_url",
+                "full_picture",
+                "attachments{media_type,media,url,subattachments}",
+            ])
+            resp = requests.get(
+                posts_url,
+                params={
+                    "fields": fields,
+                    "limit": FB_MAX_ITEMS,
+                    "access_token": FB_PAGE_TOKEN,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+
+            for post in data:
+                message = strip_html(post.get("message") or post.get("story") or "")
+                permalink = post.get("permalink_url", "").strip()
+                created_time = post.get("created_time", "")
+                title = shorten_text(message.split(".")[0] if message else f"Facebook update from {page_name}", 180)
+
+                if not title or not permalink:
+                    continue
+                if permalink in seen_links or permalink in pending_links:
+                    continue
+                if is_similar_title(title, seen_titles):
+                    continue
+                if is_similar_title(title, pending_titles):
+                    continue
+
+                image_url = post.get("full_picture")
+                video_url = None
+
+                attachments = post.get("attachments", {}).get("data", [])
+                for att in attachments:
+                    media_type = (att.get("media_type") or "").lower()
+                    if media_type == "video":
+                        media = att.get("media", {})
+                        if isinstance(media, dict):
+                            video_url = media.get("source") or video_url
+
+                summary = message or f"Facebook post from {page_name} at {created_time}"
+
+                if not is_valid_news(title, summary, page_name):
+                    continue
+
+                out.append({
+                    "title": title,
+                    "summary": summary,
+                    "link": permalink,
+                    "source_name": f"{page_name} (Facebook)",
+                    "image_url": image_url,
+                    "video_url": video_url,
+                    "score": score_news(title, summary, page_name),
+                    "status": "pending",
+                    "custom_caption": None,
+                    "attached_type": None,
+                    "attached_file_id": None,
+                    "mode": "review",
+                    "source_slug": source_slug(page_name),
+                    "created_at": now_iso(),
+                    "approved_at": None,
+                    "rejected_at": None,
+                    "skipped_at": None,
+                })
+
+        except Exception as e:
+            debug_errors.append(f"Facebook page {page_id}: {str(e)}")
+
+    return out, debug_errors
+
+
+def fetch_candidates():
+    rss_items, rss_errors = fetch_rss_candidates()
+    fb_items, fb_errors = fetch_facebook_source_candidates()
+
+    all_items = rss_items + fb_items
+    all_items.sort(key=lambda x: x["score"], reverse=True)
+
+    # stronger dedupe inside same batch
+    unique_items = []
+    seen_batch_links = set()
+    seen_batch_titles = []
+
+    for item in all_items:
+        if item["link"] in seen_batch_links:
+            continue
+        if is_similar_title(item["title"], seen_batch_titles):
+            continue
+
+        seen_batch_links.add(item["link"])
+        seen_batch_titles.append(item["title"])
+        unique_items.append(item)
+
+    return unique_items[:MAX_PENDING_PER_RUN], (rss_errors + fb_errors)
+
+
+# =========================================================
+# FACEBOOK PUBLISH
 # =========================================================
 def fb_post_text(message: str, link: str):
     if not (FB_ENABLE_PUBLISH and FB_PAGE_ID and FB_PAGE_TOKEN):
-        return
+        return {"ok": False, "error": "Facebook publish disabled or missing credentials"}
 
-    url = f"https://graph.facebook.com/{FB_PAGE_ID}/feed"
+    url = f"https://graph.facebook.com/v25.0/{FB_PAGE_ID}/feed"
     payload = {
         "message": message,
         "link": link,
         "access_token": FB_PAGE_TOKEN
     }
+
     response = requests.post(url, data=payload, timeout=60)
-    response.raise_for_status()
+
+    if response.ok:
+        return {"ok": True, "data": response.json()}
+
+    return {
+        "ok": False,
+        "status_code": response.status_code,
+        "error": response.text
+    }
 
 
 def fb_post_photo(file_path: str, caption: str):
     if not (FB_ENABLE_PUBLISH and FB_PAGE_ID and FB_PAGE_TOKEN):
-        return
+        return {"ok": False, "error": "Facebook publish disabled or missing credentials"}
 
-    url = f"https://graph.facebook.com/{FB_PAGE_ID}/photos"
+    url = f"https://graph.facebook.com/v25.0/{FB_PAGE_ID}/photos"
     with open(file_path, "rb") as f:
         response = requests.post(
             url,
@@ -744,14 +942,22 @@ def fb_post_photo(file_path: str, caption: str):
             files={"source": f},
             timeout=120
         )
-        response.raise_for_status()
+
+    if response.ok:
+        return {"ok": True, "data": response.json()}
+
+    return {
+        "ok": False,
+        "status_code": response.status_code,
+        "error": response.text
+    }
 
 
 def fb_post_video(file_path: str, caption: str):
     if not (FB_ENABLE_PUBLISH and FB_PAGE_ID and FB_PAGE_TOKEN):
-        return
+        return {"ok": False, "error": "Facebook publish disabled or missing credentials"}
 
-    url = f"https://graph.facebook.com/{FB_PAGE_ID}/videos"
+    url = f"https://graph.facebook.com/v25.0/{FB_PAGE_ID}/videos"
     with open(file_path, "rb") as f:
         response = requests.post(
             url,
@@ -759,7 +965,15 @@ def fb_post_video(file_path: str, caption: str):
             files={"source": f},
             timeout=300
         )
-        response.raise_for_status()
+
+    if response.ok:
+        return {"ok": True, "data": response.json()}
+
+    return {
+        "ok": False,
+        "status_code": response.status_code,
+        "error": response.text
+    }
 
 
 # =========================================================
@@ -768,7 +982,9 @@ def fb_post_video(file_path: str, caption: str):
 async def publish_item(app: Application, item: dict):
     bot = app.bot
     caption = build_public_caption(item)
+    fb_result = {"ok": True}
 
+    # Admin attached media gets highest priority
     if item.get("attached_type") and item.get("attached_file_id"):
         if item["attached_type"] == "photo":
             await bot.send_photo(chat_id=PUBLIC_CHANNEL_ID, photo=item["attached_file_id"], caption=caption[:1024])
@@ -778,31 +994,43 @@ async def publish_item(app: Application, item: dict):
         if FB_ENABLE_PUBLISH:
             tg_file = await bot.get_file(item["attached_file_id"])
             suffix = ".jpg" if item["attached_type"] == "photo" else ".mp4"
-
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 tmp_path = tmp.name
-
             await tg_file.download_to_drive(custom_path=tmp_path)
 
             try:
                 if item["attached_type"] == "photo":
-                    fb_post_photo(tmp_path, caption)
+                    fb_result = fb_post_photo(tmp_path, caption)
                 else:
-                    fb_post_video(tmp_path, caption)
+                    fb_result = fb_post_video(tmp_path, caption)
             finally:
                 try:
                     os.remove(tmp_path)
                 except Exception:
                     pass
-        return
 
+        return fb_result
+
+    # Direct source video URL if available
+    if item.get("video_url") and is_probably_video_link(item["video_url"]):
+        try:
+            await bot.send_video(chat_id=PUBLIC_CHANNEL_ID, video=item["video_url"], caption=caption[:1024])
+            if FB_ENABLE_PUBLISH:
+                fb_result = fb_post_text(caption, item["link"])
+            return fb_result
+        except Exception:
+            pass
+
+    # Image / thumbnail
     if item.get("image_url"):
         await bot.send_photo(chat_id=PUBLIC_CHANNEL_ID, photo=item["image_url"], caption=caption[:1024])
     else:
         await bot.send_message(chat_id=PUBLIC_CHANNEL_ID, text=caption)
 
     if FB_ENABLE_PUBLISH:
-        fb_post_text(caption, item["link"])
+        fb_result = fb_post_text(caption, item["link"])
+
+    return fb_result
 
 
 # =========================================================
@@ -869,7 +1097,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/review@{bot_name}\n"
         f"/approved@{bot_name}\n"
         f"/status@{bot_name}\n"
-        f"/sourceerrors@{bot_name}\n\n"
+        f"/sourceerrors@{bot_name}\n"
+        f"/resetsources@{bot_name}\n\n"
         "Approval:\n"
         f"/approve@{bot_name} 1\n"
         f"/reject@{bot_name} 1\n"
@@ -902,14 +1131,14 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Skipped: {len(skipped)}\n"
         f"Sources enabled: {len(enabled)}\n"
         f"Sources disabled: {len(disabled)}\n"
-        f"Facebook publish: {'ON' if FB_ENABLE_PUBLISH else 'OFF'}"
+        f"Facebook publish: {'ON' if FB_ENABLE_PUBLISH else 'OFF'}\n"
+        f"Facebook source: {'ON' if FB_ENABLE_SOURCE else 'OFF'}"
     )
 
 
 async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not is_admin_user(update.effective_user.id):
         return
-
     items = next_pending_indexed()
     await update.message.reply_text(format_pending_list(items))
 
@@ -942,7 +1171,6 @@ async def review_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def approved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not is_admin_user(update.effective_user.id):
         return
-
     items = get_approved_items()
     await update.message.reply_text(format_approved_list(items))
 
@@ -966,15 +1194,26 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        await publish_item(context.application, item)
+        fb_result = await publish_item(context.application, item)
+
         item["status"] = "approved"
         item["approved_at"] = now_iso()
         save_queue(queue)
         add_seen_item(item)
 
-        await update.message.reply_text("✅ Approved and posted.")
+        await update.message.reply_text("✅ Approved and posted to Telegram.")
         await update.message.reply_text(generate_reel_script(item))
         await update_admin_pending_message(context.bot, item)
+
+        if FB_ENABLE_PUBLISH:
+            if fb_result and not fb_result.get("ok", False):
+                await update.message.reply_text(
+                    "⚠️ Telegram-এ post হয়েছে, কিন্তু Facebook publish fail করেছে.\n\n"
+                    f"Error:\n{shorten_text(str(fb_result.get('error', 'Unknown error')), 1200)}"
+                )
+            else:
+                await update.message.reply_text("✅ Facebook page-এও post হয়েছে।")
+
     except Exception as e:
         await update.message.reply_text(f"Approve failed: {e}")
 
@@ -1181,7 +1420,6 @@ async def disablesource_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def resetsources_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not is_admin_user(update.effective_user.id):
         return
-
     reset_sources_to_default()
     await update.message.reply_text("✅ Sources reset to DEFAULT_SOURCES.")
 
@@ -1201,9 +1439,12 @@ async def listsources_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mode = s.get("mode", "auto")
         fail_count = s.get("fail_count", 0)
         lines.append(
-            f"- {s.get('name')} [{status}] [{mode}] [fails:{fail_count}]\n"
-            f"{s.get('url')}"
+            f"- {s.get('name')} [{status}] [{mode}] [fails:{fail_count}]\n{s.get('url')}"
         )
+
+    if FB_ENABLE_SOURCE:
+        lines.append("")
+        lines.append(f"Facebook source pages: {', '.join(FB_SOURCE_PAGE_IDS) if FB_SOURCE_PAGE_IDS else 'none'}")
 
     await update.message.reply_text("Current sources:\n\n" + "\n".join(lines[:100]))
 
@@ -1215,10 +1456,6 @@ async def sourceerrors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sources = load_sources()
     bad = [s for s in sources if s.get("last_error")]
 
-    if not bad:
-        await update.message.reply_text("No source errors.")
-        return
-
     lines = []
     for s in bad[:30]:
         lines.append(
@@ -1227,6 +1464,13 @@ async def sourceerrors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"  fails: {s.get('fail_count', 0)}\n"
             f"  error: {shorten_text(s.get('last_error', ''), 180)}"
         )
+
+    if FB_ENABLE_SOURCE and not FB_SOURCE_PAGE_IDS:
+        lines.append("Facebook source is ON but FB_SOURCE_PAGE_IDS is empty.")
+
+    if not lines:
+        await update.message.reply_text("No source errors.")
+        return
 
     await update.message.reply_text("Source errors:\n\n" + "\n\n".join(lines))
 
@@ -1249,7 +1493,6 @@ async def fetchnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def media_attach_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not is_admin_user(update.effective_user.id):
         return
-
     if not update.message or not update.message.reply_to_message:
         return
 
@@ -1286,13 +1529,19 @@ async def collect_now(app: Application):
     for cand in candidates:
         if cand.get("mode") == "auto":
             try:
-                await publish_item(app, cand)
+                fb_result = await publish_item(app, cand)
                 cand["status"] = "approved"
                 cand["approved_at"] = now_iso()
                 queue.append(cand)
                 add_seen_item(cand)
                 auto_posted += 1
-                debug_lines.append(f"Auto posted: {cand['source_name']} -> {cand['title'][:80]}")
+
+                if FB_ENABLE_PUBLISH and fb_result and not fb_result.get("ok", False):
+                    debug_lines.append(
+                        f"Auto posted to Telegram but Facebook failed: {cand['source_name']} -> {cand['title'][:80]}"
+                    )
+                else:
+                    debug_lines.append(f"Auto posted: {cand['source_name']} -> {cand['title'][:80]}")
                 continue
             except Exception as e:
                 cand["mode"] = "review"
@@ -1387,6 +1636,8 @@ def main():
     print(f"Post hours: {POST_HOURS}")
     print(f"Check interval: {CHECK_INTERVAL}")
     print(f"Facebook publish enabled: {FB_ENABLE_PUBLISH}")
+    print(f"Facebook source enabled: {FB_ENABLE_SOURCE}")
+    print(f"Facebook source pages: {FB_SOURCE_PAGE_IDS}")
     print("===================================")
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
