@@ -19,9 +19,9 @@ from telegram.ext import (
     filters,
 )
 
-# =========================
+# =========================================================
 # ENV
-# =========================
+# =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 PUBLIC_CHANNEL_ID = os.getenv("PUBLIC_CHANNEL_ID", "").strip()
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "").strip())
@@ -31,8 +31,11 @@ ADMIN_USER_IDS = {
 }
 
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Dhaka").strip()
-POST_HOURS_RAW = os.getenv("POST_HOURS", "9,20").strip()
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
+POST_HOURS_RAW = os.getenv(
+    "POST_HOURS",
+    "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23"
+).strip()
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "600"))
 MAX_PENDING_PER_RUN = int(os.getenv("MAX_PENDING_PER_RUN", "5"))
 
 FB_ENABLE_PUBLISH = os.getenv("FB_ENABLE_PUBLISH", "false").strip().lower() == "true"
@@ -45,21 +48,31 @@ QUEUE_FILE = DATA_DIR / "review_queue.json"
 STATE_FILE = DATA_DIR / "schedule_state.json"
 SOURCES_FILE = DATA_DIR / "custom_sources.json"
 
-DEFAULT_RSS_FEEDS = [
-    ("Prothom Alo", "https://www.prothomalo.com/feed"),
-    ("BDNews24", "https://bdnews24.com/feed/"),
-    ("Bangla Tribune", "https://banglatribune.com/feed/"),
-    ("The Daily Star", "https://www.thedailystar.net/frontpage/rss.xml"),
-    ("BBC World", "https://feeds.bbci.co.uk/news/world/rss.xml"),
-    ("BBC Technology", "https://feeds.bbci.co.uk/news/technology/rss.xml"),
-    ("TechCrunch", "https://techcrunch.com/feed/"),
-    ("The Verge", "https://www.theverge.com/rss/index.xml"),
+# =========================================================
+# DEFAULT SOURCES
+# =========================================================
+DEFAULT_SOURCES = [
+    {"name": "Prothom Alo", "url": "https://www.prothomalo.com/feed", "type": "feed"},
+    {"name": "BDNews24 Main", "url": "https://bdnews24.com/feed/", "type": "feed"},
+    {"name": "Bangla Tribune", "url": "https://banglatribune.com/feed/", "type": "feed"},
+    {"name": "The Daily Star", "url": "https://www.thedailystar.net/frontpage/rss.xml", "type": "feed"},
+    {"name": "BBC World", "url": "https://feeds.bbci.co.uk/news/world/rss.xml", "type": "feed"},
+    {"name": "BBC Technology", "url": "https://feeds.bbci.co.uk/news/technology/rss.xml", "type": "feed"},
+    {"name": "TechCrunch", "url": "https://techcrunch.com/feed/", "type": "feed"},
+    {"name": "The Verge", "url": "https://www.theverge.com/rss/index.xml", "type": "feed"},
+    {"name": "bdnews24 Politics", "url": "https://bangla.bdnews24.com/politics/?getXmlFeed=true&widgetId=1151&widgetName=rssfeed", "type": "feed"},
+    {"name": "bdnews24 World", "url": "https://bangla.bdnews24.com/world/?getXmlFeed=true&widgetId=1215510&widgetName=rssfeed", "type": "feed"},
+    {"name": "bdnews24 Business", "url": "https://bdnews24.com/business/?getXmlFeed=true&widgetId=1210&widgetName=rssfeed", "type": "feed"},
 ]
 
 BANGLADESH_KEYWORDS = [
     "bangladesh", "বাংলাদেশ", "dhaka", "ঢাকা", "chattogram", "চট্টগ্রাম",
     "sylhet", "সিলেট", "rajshahi", "রাজশাহী", "khulna", "খুলনা",
-    "barishal", "বরিশাল", "rangpur", "রংপুর", "mymensingh", "ময়মনসিংহ"
+    "barishal", "বরিশাল", "rangpur", "রংপুর", "mymensingh", "ময়মনসিংহ",
+    "cumilla", "কুমিল্লা", "noakhali", "নোয়াখালী", "feni", "ফেনী",
+    "bogura", "বগুড়া", "gazipur", "গাজীপুর", "narayanganj", "নারায়ণগঞ্জ",
+    "jessore", "যশোর", "rajbari", "রাজবাড়ী", "kushtia", "কুষ্টিয়া",
+    "pabna", "পাবনা", "dinajpur", "দিনাজপুর", "sunamganj", "সুনামগঞ্জ"
 ]
 
 WORLD_IMPORTANT_KEYWORDS = [
@@ -83,9 +96,9 @@ BORING_KEYWORDS = [
     "quarterly report", "shareholder", "promo"
 ]
 
-# =========================
-# FILE HELPERS
-# =========================
+# =========================================================
+# JSON HELPERS
+# =========================================================
 def load_json(path: Path, default):
     if path.exists():
         try:
@@ -99,9 +112,9 @@ def save_json(path: Path, data):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# =========================
+# =========================================================
 # BASIC HELPERS
-# =========================
+# =========================================================
 def parse_post_hours(raw: str):
     hours = []
     for x in raw.split(","):
@@ -110,7 +123,7 @@ def parse_post_hours(raw: str):
             h = int(x)
             if 0 <= h <= 23:
                 hours.append(h)
-    return hours if hours else [9, 20]
+    return hours if hours else list(range(24))
 
 
 POST_HOURS = parse_post_hours(POST_HOURS_RAW)
@@ -123,7 +136,7 @@ def strip_html(raw_text):
     return text
 
 
-def shorten_text(text, limit=420):
+def shorten_text(text, limit=550):
     text = (text or "").strip()
     if len(text) <= limit:
         return text
@@ -148,18 +161,70 @@ def is_admin_user(user_id: int) -> bool:
     return user_id in ADMIN_USER_IDS
 
 
-# =========================
-# CONTENT CLASSIFICATION
-# =========================
+# =========================================================
+# SOURCES
+# =========================================================
+def load_sources():
+    existing = load_json(SOURCES_FILE, None)
+    if existing is None:
+        save_json(SOURCES_FILE, DEFAULT_SOURCES)
+        return DEFAULT_SOURCES
+    return existing
+
+
+def save_sources(sources):
+    save_json(SOURCES_FILE, sources)
+
+
+# =========================================================
+# SEEN / QUEUE
+# =========================================================
+def load_seen():
+    return load_json(SEEN_FILE, [])
+
+
+def save_seen(data):
+    save_json(SEEN_FILE, data)
+
+
+def add_seen_item(item):
+    seen = load_seen()
+    seen.append({
+        "title": item["title"],
+        "link": item["link"],
+        "saved_at": datetime.now(ZoneInfo(TIMEZONE)).isoformat()
+    })
+    save_seen(seen)
+
+
+def load_queue():
+    return load_json(QUEUE_FILE, [])
+
+
+def save_queue(queue):
+    save_json(QUEUE_FILE, queue)
+
+
+def find_pending_by_reply(queue, reply_message_id):
+    return next(
+        (x for x in queue if x.get("status") == "pending" and x.get("admin_message_id") == reply_message_id),
+        None
+    )
+
+
+# =========================================================
+# CLASSIFY
+# =========================================================
 def classify_news(title, summary, source_name):
     text = f"{title} {summary} {source_name}".lower()
 
     if contains_any(text, BORING_KEYWORDS):
         return "boring"
 
-    if contains_any(text, BANGLADESH_KEYWORDS) or source_name in [
-        "Prothom Alo", "BDNews24", "Bangla Tribune", "The Daily Star"
-    ]:
+    if contains_any(text, BANGLADESH_KEYWORDS) or source_name in {
+        "Prothom Alo", "BDNews24 Main", "Bangla Tribune", "The Daily Star",
+        "bdnews24 Politics", "bdnews24 World", "bdnews24 Business"
+    }:
         return "bangladesh"
 
     if contains_any(text, WORLD_IMPORTANT_KEYWORDS):
@@ -223,9 +288,9 @@ def is_similar_title(new_title, seen_titles):
     return False
 
 
-# =========================
-# SUMMARY / CAPTIONS
-# =========================
+# =========================================================
+# BANGLA SUMMARY
+# =========================================================
 def to_bangla(text):
     text = (text or "").strip()
     if not text:
@@ -237,8 +302,8 @@ def to_bangla(text):
 
 
 def make_bangla_summary(title, summary, source_name):
-    base = f"{title}. {shorten_text(summary, 260)}"
-    translated = shorten_text(to_bangla(base), 520)
+    base = f"{title}. {shorten_text(summary, 350)}"
+    translated = shorten_text(to_bangla(base), 700)
     category = classify_news(title, summary, source_name)
 
     if category == "bangladesh":
@@ -268,19 +333,17 @@ def build_pending_caption(item):
         else:
             header = "📱 PENDING: Tech"
 
-    body = make_bangla_summary(title, summary, source_name)
-
     return (
         f"{header}\n\n"
         f"Title: {title}\n\n"
-        f"{body}\n\n"
+        f"{make_bangla_summary(title, summary, source_name)}\n\n"
         f"Source: {source_name}\n"
         f"{link}\n\n"
-        f"Reply commands:\n"
+        f"Reply with:\n"
         f"/approve\n"
         f"/skip\n"
         f"/editcaption তোমার নতুন caption\n\n"
-        f"Edited photo/video attach করতে এই pending post-এ reply করে media send করো।"
+        f"Edited photo/video attach করতে এই post-এ reply করে media send করো।"
     )
 
 
@@ -316,7 +379,7 @@ def build_public_caption(item):
 def generate_reel_script(item):
     title = strip_html(item["title"])
     summary = strip_html(item["summary"])
-    short_summary = shorten_text(summary, 160)
+    short_summary = shorten_text(summary, 180)
     return (
         "🎥 REELS SCRIPT\n\n"
         f"Hook:\nআজকের সবচেয়ে বড় খবর — {title}\n\n"
@@ -325,24 +388,9 @@ def generate_reel_script(item):
     )
 
 
-# =========================
-# SOURCES
-# =========================
-def load_sources():
-    existing = load_json(SOURCES_FILE, None)
-    if existing is None:
-        save_json(SOURCES_FILE, DEFAULT_RSS_FEEDS.copy())
-        return DEFAULT_RSS_FEEDS.copy()
-    return existing
-
-
-def save_sources(sources):
-    save_json(SOURCES_FILE, sources)
-
-
-# =========================
+# =========================================================
 # MEDIA
-# =========================
+# =========================================================
 def extract_image(entry):
     media_content = getattr(entry, "media_content", None)
     if media_content and isinstance(media_content, list):
@@ -374,46 +422,23 @@ def extract_image(entry):
     return None
 
 
-# =========================
-# SEEN / QUEUE
-# =========================
-def load_seen():
-    return load_json(SEEN_FILE, [])
+# =========================================================
+# FEED FETCH
+# =========================================================
+def fetch_feed_entries(source_name: str, source_url: str):
+    headers = {
+        "User-Agent": "Mozilla/5.0 NewsBot/1.0"
+    }
+
+    response = requests.get(source_url, timeout=20, headers=headers)
+    response.raise_for_status()
+
+    parsed = feedparser.parse(response.content)
+    entries = getattr(parsed, "entries", [])
+    return entries
 
 
-def save_seen(data):
-    save_json(SEEN_FILE, data)
-
-
-def add_seen_item(item):
-    seen = load_seen()
-    seen.append({
-        "title": item["title"],
-        "link": item["link"],
-        "saved_at": datetime.now(ZoneInfo(TIMEZONE)).isoformat()
-    })
-    save_seen(seen)
-
-
-def load_queue():
-    return load_json(QUEUE_FILE, [])
-
-
-def save_queue(queue):
-    save_json(QUEUE_FILE, queue)
-
-
-def find_pending_by_reply(queue, reply_message_id):
-    return next(
-        (x for x in queue if x.get("status") == "pending" and x.get("admin_message_id") == reply_message_id),
-        None
-    )
-
-
-# =========================
-# FETCH
-# =========================
-def fetch_rss_candidates():
+def fetch_candidates():
     seen = load_seen()
     seen_links = {x.get("link", "") for x in seen}
     seen_titles = [x.get("title", "") for x in seen]
@@ -425,18 +450,25 @@ def fetch_rss_candidates():
     sources = load_sources()
 
     for source in sources:
-        if not isinstance(source, list) or len(source) != 2:
+        if not isinstance(source, dict):
             continue
 
-        source_name, feed_url = source
+        source_name = source.get("name", "").strip()
+        source_url = source.get("url", "").strip()
+        source_type = source.get("type", "feed").strip().lower()
+
+        if not source_name or not source_url:
+            continue
+
+        if source_type != "feed":
+            continue
 
         try:
-            feed = feedparser.parse(feed_url)
+            entries = fetch_feed_entries(source_name, source_url)
         except Exception as e:
-            print(f"[ERROR] Feed parse failed for {source_name}: {e}")
+            print(f"[ERROR] Source failed: {source_name} -> {e}")
             continue
 
-        entries = getattr(feed, "entries", [])
         for entry in entries[:12]:
             title = getattr(entry, "title", "").strip()
             link = getattr(entry, "link", "").strip()
@@ -471,13 +503,12 @@ def fetch_rss_candidates():
     return out[:MAX_PENDING_PER_RUN]
 
 
-# =========================
-# FACEBOOK PUBLISH
-# =========================
+# =========================================================
+# FB PUBLISH
+# =========================================================
 def fb_post_text(message: str, link: str):
     if not (FB_ENABLE_PUBLISH and FB_PAGE_ID and FB_PAGE_TOKEN):
         return
-
     url = f"https://graph.facebook.com/{FB_PAGE_ID}/feed"
     payload = {
         "message": message,
@@ -490,7 +521,6 @@ def fb_post_text(message: str, link: str):
 def fb_post_photo(file_path: str, caption: str):
     if not (FB_ENABLE_PUBLISH and FB_PAGE_ID and FB_PAGE_TOKEN):
         return
-
     url = f"https://graph.facebook.com/{FB_PAGE_ID}/photos"
     with open(file_path, "rb") as f:
         requests.post(
@@ -504,7 +534,6 @@ def fb_post_photo(file_path: str, caption: str):
 def fb_post_video(file_path: str, caption: str):
     if not (FB_ENABLE_PUBLISH and FB_PAGE_ID and FB_PAGE_TOKEN):
         return
-
     url = f"https://graph.facebook.com/{FB_PAGE_ID}/videos"
     with open(file_path, "rb") as f:
         requests.post(
@@ -515,9 +544,9 @@ def fb_post_video(file_path: str, caption: str):
         )
 
 
-# =========================
+# =========================================================
 # PUBLISH
-# =========================
+# =========================================================
 async def publish_item(app: Application, item: dict):
     bot = app.bot
     caption = build_public_caption(item)
@@ -556,25 +585,24 @@ async def publish_item(app: Application, item: dict):
     fb_post_text(caption, item["link"])
 
 
-# =========================
+# =========================================================
 # COMMANDS
-# =========================
+# =========================================================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not is_admin_user(update.effective_user.id):
         return
     await update.message.reply_text(
         "Bot ready.\n\n"
-        "Reply-based commands:\n"
-        "Reply to pending post with:\n"
+        "Reply commands:\n"
         "/approve\n"
         "/skip\n"
         "/editcaption তোমার নতুন caption\n\n"
-        "Edited photo/video attach:\n"
-        "pending post-এ reply করে media send করো\n\n"
-        "Source commands:\n"
-        "/addsource Name | RSS_URL\n"
+        "General:\n"
+        "/status\n"
+        "/fetchnow\n"
         "/listsources\n"
-        "/fetchnow"
+        "/addsource Name | URL\n"
+        "/removesource exact_source_name"
     )
 
 
@@ -669,19 +697,42 @@ async def addsource_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     raw = update.message.text or ""
     payload = raw.replace("/addsource", "", 1).strip()
+
     if "|" not in payload:
-        await update.message.reply_text("Use: /addsource Name | RSS_URL")
+        await update.message.reply_text("Use: /addsource Name | URL")
         return
 
     name, url = [x.strip() for x in payload.split("|", 1)]
     if not name or not url:
-        await update.message.reply_text("Use: /addsource Name | RSS_URL")
+        await update.message.reply_text("Use: /addsource Name | URL")
         return
 
     sources = load_sources()
-    sources.append([name, url])
+    sources.append({"name": name, "url": url, "type": "feed"})
     save_sources(sources)
+
     await update.message.reply_text(f"Source added:\n{name}\n{url}")
+
+
+async def removesource_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin_user(update.effective_user.id):
+        return
+
+    raw = update.message.text or ""
+    name = raw.replace("/removesource", "", 1).strip()
+    if not name:
+        await update.message.reply_text("Use: /removesource exact_source_name")
+        return
+
+    sources = load_sources()
+    new_sources = [s for s in sources if s.get("name") != name]
+
+    if len(new_sources) == len(sources):
+        await update.message.reply_text("Source name not found.")
+        return
+
+    save_sources(new_sources)
+    await update.message.reply_text(f"Removed source: {name}")
 
 
 async def listsources_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -693,8 +744,11 @@ async def listsources_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No sources found.")
         return
 
-    text = "Current sources:\n\n" + "\n".join([f"- {name} | {url}" for name, url in sources[:100]])
-    await update.message.reply_text(text)
+    lines = []
+    for s in sources[:100]:
+        lines.append(f"- {s.get('name')} | {s.get('url')}")
+
+    await update.message.reply_text("Current sources:\n\n" + "\n".join(lines))
 
 
 async def fetchnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -702,8 +756,14 @@ async def fetchnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text("Fetching now...")
-    added = await collect_now(context.application)
-    await update.message.reply_text(f"Fetch done. Added: {added}")
+    try:
+        added, debug = await collect_now(context.application)
+        msg = f"Fetch done. Added: {added}"
+        if debug:
+            msg += f"\n\nDebug:\n{debug[:3000]}"
+        await update.message.reply_text(msg)
+    except Exception as e:
+        await update.message.reply_text(f"Fetch failed: {e}")
 
 
 async def media_attach_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -732,13 +792,14 @@ async def media_attach_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
 
-# =========================
+# =========================================================
 # COLLECT
-# =========================
+# =========================================================
 async def collect_now(app: Application):
-    candidates = fetch_rss_candidates()
+    candidates = fetch_candidates()
     queue = load_queue()
     added = 0
+    debug_lines = [f"Candidates found: {len(candidates)}"]
 
     for cand in candidates:
         text = build_pending_caption(cand)
@@ -751,9 +812,10 @@ async def collect_now(app: Application):
         cand["admin_message_id"] = sent.message_id
         queue.append(cand)
         added += 1
+        debug_lines.append(f"Added: {cand['source_name']} -> {cand['title'][:80]}")
 
     save_queue(queue)
-    return added
+    return added, "\n".join(debug_lines)
 
 
 def get_slot_key(now_dt):
@@ -787,9 +849,10 @@ async def collector_loop(app: Application):
             print(f"[CHECK] {now_dt}")
 
             if can_collect and slot_key:
-                added = await collect_now(app)
+                added, debug = await collect_now(app)
                 mark_collected(slot_key)
                 print(f"[COLLECTED] {added}")
+                print(debug)
             else:
                 print("[WAIT] not collection window")
 
@@ -803,9 +866,9 @@ async def post_init(app: Application):
     app.create_task(collector_loop(app))
 
 
-# =========================
+# =========================================================
 # MAIN
-# =========================
+# =========================================================
 def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN is missing")
@@ -829,6 +892,7 @@ def main():
     app.add_handler(CommandHandler("skip", skip_cmd))
     app.add_handler(CommandHandler("editcaption", editcaption_cmd))
     app.add_handler(CommandHandler("addsource", addsource_cmd))
+    app.add_handler(CommandHandler("removesource", removesource_cmd))
     app.add_handler(CommandHandler("listsources", listsources_cmd))
     app.add_handler(CommandHandler("fetchnow", fetchnow_cmd))
     app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO), media_attach_handler))
