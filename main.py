@@ -11,7 +11,6 @@ import feedparser
 import requests
 from deep_translator import GoogleTranslator
 from telegram import Update
-from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -25,12 +24,14 @@ from telegram.ext import (
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 PUBLIC_CHANNEL_ID = os.getenv("PUBLIC_CHANNEL_ID", "").strip()
+
 ADMIN_CHAT_ID_RAW = os.getenv("ADMIN_CHAT_ID", "").strip()
 ADMIN_CHAT_ID = int(ADMIN_CHAT_ID_RAW) if ADMIN_CHAT_ID_RAW.lstrip("-").isdigit() else 0
 
 ADMIN_USER_IDS_RAW = os.getenv("ADMIN_USER_IDS", "").strip()
 ADMIN_USER_IDS = {
-    int(x.strip()) for x in ADMIN_USER_IDS_RAW.split(",") if x.strip().lstrip("-").isdigit()
+    int(x.strip()) for x in ADMIN_USER_IDS_RAW.split(",")
+    if x.strip().lstrip("-").isdigit()
 }
 
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Dhaka").strip()
@@ -62,25 +63,20 @@ DEFAULT_SOURCES = [
     {"name": "BBC Technology", "url": "https://feeds.bbci.co.uk/news/technology/rss.xml", "type": "feed", "mode": "auto"},
     {"name": "TechCrunch", "url": "https://techcrunch.com/feed/", "type": "feed", "mode": "auto"},
     {"name": "The Verge", "url": "https://www.theverge.com/rss/index.xml", "type": "feed", "mode": "auto"},
-
-    # Working BD feeds only if valid; broken ones will be auto-disabled if they fail repeatedly
     {"name": "BDNews24 Main", "url": "https://bdnews24.com/feed/", "type": "feed", "mode": "auto"},
     {"name": "bdnews24 Politics", "url": "https://bangla.bdnews24.com/politics/?getXmlFeed=true&widgetId=1151&widgetName=rssfeed", "type": "feed", "mode": "auto"},
     {"name": "bdnews24 World", "url": "https://bangla.bdnews24.com/world/?getXmlFeed=true&widgetId=1215510&widgetName=rssfeed", "type": "feed", "mode": "auto"},
     {"name": "bdnews24 Business", "url": "https://bdnews24.com/business/?getXmlFeed=true&widgetId=1210&widgetName=rssfeed", "type": "feed", "mode": "auto"},
 
-    # YouTube news channel feeds — replace/add more real channel ids as needed
+    # YouTube news feeds
     {"name": "BBC News YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC16niRr50-MSBwiO3YDb3RA", "type": "feed", "mode": "auto"},
     {"name": "Al Jazeera English YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCNye-wNBqNL5ZzHSJj3l8Bg", "type": "feed", "mode": "auto"},
     {"name": "Reuters YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UChqUTb7kYRX8-EiaN3XFrSQ", "type": "feed", "mode": "auto"},
     {"name": "DW News YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCknLrEdhRCp1aegoMqRaCZg", "type": "feed", "mode": "auto"},
     {"name": "Jamuna TV YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCN6sm8iHiPd0cnoUardDAnA", "type": "feed", "mode": "auto"},
     {"name": "Somoy TV YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCxHoBXkY88Tb8z1Ssj6CWsQ", "type": "feed", "mode": "auto"},
-    {"name": "Channel 24 YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCSxMZvvYl6v_YX9l0nQ6R0A", "type": "feed", "mode": "auto"},
-    {"name": "Independent TV YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCN8_7lJwy6B6fQYx0N3A0qg", "type": "feed", "mode": "auto"},
 
-    # Facebook source example
-    # Real bridge/API URL না পেলে এটা add কোরো না
+    # Example Facebook review source
     # {"name": "Facebook Page 1", "url": "https://REAL-FACEBOOK-FEED-OR-BRIDGE-URL", "type": "feed", "mode": "review"},
 ]
 
@@ -97,7 +93,8 @@ BANGLADESH_KEYWORDS = [
 WORLD_IMPORTANT_KEYWORDS = [
     "war", "iran", "usa", "america", "israel", "china", "russia", "ukraine",
     "missile", "attack", "military", "conflict", "government", "president",
-    "sanction", "border", "security", "breaking", "urgent", "earthquake", "crisis"
+    "sanction", "border", "security", "breaking", "urgent", "earthquake", "crisis",
+    "gaza", "palestine", "syria", "iranian", "israeli"
 ]
 
 TECH_KEYWORDS = [
@@ -112,9 +109,8 @@ TECH_KEYWORDS = [
 BORING_KEYWORDS = [
     "coupon", "discount", "conference pass", "ticket", "sale ends",
     "subscribe now", "investor presentation", "earnings call",
-    "quarterly report", "shareholder", "promo", "podcast episode", "livestream soon"
+    "quarterly report", "shareholder", "promo", "podcast", "livestream"
 ]
-
 
 # =========================================================
 # JSON HELPERS
@@ -187,12 +183,6 @@ def now_iso():
     return datetime.now(ZoneInfo(TIMEZONE)).isoformat()
 
 
-def reply_hint(bot_username: str):
-    if not bot_username:
-        return "/approve or /skip"
-    return f"/approve@{bot_username} or /skip@{bot_username}"
-
-
 def source_slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-") or "source"
 
@@ -234,9 +224,16 @@ def save_sources(sources):
     save_json(SOURCES_FILE, clean)
 
 
+def reset_sources_to_default():
+    sources = [normalize_source(x) for x in DEFAULT_SOURCES]
+    save_sources(sources)
+    return sources
+
+
 def mark_source_result(source_name: str, ok: bool, error: str = ""):
     sources = load_sources()
     updated = False
+
     for src in sources:
         if src.get("name") == source_name:
             if ok:
@@ -246,10 +243,13 @@ def mark_source_result(source_name: str, ok: bool, error: str = ""):
             else:
                 src["fail_count"] = int(src.get("fail_count", 0)) + 1
                 src["last_error"] = error[:500]
+
                 if "your-facebook-feed-or-bridge-url" in src.get("url", ""):
                     src["enabled"] = False
+
                 if src["fail_count"] >= 10:
                     src["enabled"] = False
+
             updated = True
             break
 
@@ -273,7 +273,7 @@ def add_seen_item(item):
     seen.append({
         "title": item["title"],
         "link": item["link"],
-        "saved_at": now_iso(),
+        "saved_at": now_iso()
     })
     save_seen(seen)
 
@@ -294,13 +294,11 @@ def find_pending_by_reply(queue, reply_message_id):
 
 
 def get_pending_items():
-    queue = load_queue()
-    return [x for x in queue if x.get("status") == "pending"]
+    return [x for x in load_queue() if x.get("status") == "pending"]
 
 
 def get_approved_items():
-    queue = load_queue()
-    return [x for x in queue if x.get("status") == "approved"]
+    return [x for x in load_queue() if x.get("status") == "approved"]
 
 
 def next_pending_indexed():
@@ -309,8 +307,7 @@ def next_pending_indexed():
 
 
 def find_pending_by_index(index_number: int):
-    indexed = next_pending_indexed()
-    for idx, item in indexed:
+    for idx, item in next_pending_indexed():
         if idx == index_number:
             return item
     return None
@@ -328,7 +325,7 @@ def classify_news(title, summary, source_name):
     if contains_any(text, BANGLADESH_KEYWORDS) or source_name in {
         "Prothom Alo", "BDNews24 Main", "Bangla Tribune", "The Daily Star",
         "bdnews24 Politics", "bdnews24 World", "bdnews24 Business",
-        "Jamuna TV YouTube", "Somoy TV YouTube", "Channel 24 YouTube", "Independent TV YouTube"
+        "Jamuna TV YouTube", "Somoy TV YouTube"
     }:
         return "bangladesh"
 
@@ -393,13 +390,15 @@ def is_similar_title(new_title, seen_titles):
         old_norm = normalize_text(old)
         if not old_norm:
             continue
+
         if new_norm == old_norm or new_norm in old_norm or old_norm in new_norm:
             return True
+
     return False
 
 
 # =========================================================
-# BANGLA SUMMARY
+# SUMMARY
 # =========================================================
 def to_bangla(text):
     text = (text or "").strip()
@@ -421,9 +420,9 @@ def make_english_summary(title, summary):
     text = f"{title}. {summary}"
     text = strip_html(text)
 
-    # Cleaner longer summary
     parts = re.split(r"(?<=[.!?])\s+", text)
     useful_parts = []
+
     for p in parts:
         p = p.strip()
         if not p:
@@ -431,6 +430,7 @@ def make_english_summary(title, summary):
         if len(p) < 25:
             continue
         useful_parts.append(p)
+
         if len(" ".join(useful_parts)) >= 500:
             break
 
@@ -455,7 +455,7 @@ def make_bangla_summary(title, summary, source_name):
     return f"{prefix} {translated}"
 
 
-def build_pending_caption(item, bot_username=""):
+def build_pending_caption(item):
     title = strip_html(item["title"])
     summary = strip_html(item["summary"])
     source_name = strip_html(item["source_name"])
@@ -474,24 +474,20 @@ def build_pending_caption(item, bot_username=""):
         else:
             header = "📱 PENDING: Tech"
 
-    mode_label = "Auto" if mode == "auto" else "Review"
-
     return (
         f"{header}\n"
         f"ID: {idx}\n"
-        f"Mode: {mode_label}\n\n"
+        f"Mode: {mode}\n\n"
         f"Title: {title}\n\n"
         f"{make_bangla_summary(title, summary, source_name)}\n\n"
         f"Source: {source_name}\n"
         f"{link}\n\n"
         f"Action:\n"
-        f"Reply here with {reply_hint(bot_username)}\n"
-        f"অথবা use করো:\n"
         f"/approve {idx}\n"
         f"/reject {idx}\n"
         f"/skip {idx}\n"
         f"/editcaption {idx} তোমার নতুন caption\n\n"
-        f"Edited photo/video attach করতে এই post-এ reply করে media send করো।"
+        f"Reply করেও /approve বা /skip দিতে পারো।"
     )
 
 
@@ -529,6 +525,7 @@ def generate_reel_script(item):
     title = strip_html(item["title"])
     summary = strip_html(item["summary"])
     short_summary = shorten_text(strip_html(summary), 220)
+
     return (
         "🎥 REELS SCRIPT\n\n"
         f"Hook:\nআজকের সবচেয়ে বড় খবর — {title}\n\n"
@@ -557,6 +554,7 @@ def format_approved_list(items):
 
     latest = list(reversed(items))[:20]
     lines = ["✅ Approved items:\n"]
+
     for idx, item in enumerate(latest, start=1):
         title = shorten_text(strip_html(item.get("title", "")), 90)
         source = strip_html(item.get("source_name", "Unknown"))
@@ -604,16 +602,13 @@ def extract_image(entry):
 # FEED FETCH
 # =========================================================
 def fetch_feed_entries(source_name: str, source_url: str):
-    headers = {
-        "User-Agent": "Mozilla/5.0 NewsBot/2.0"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 NewsBot/2.0"}
 
     response = requests.get(source_url, timeout=25, headers=headers)
     response.raise_for_status()
 
     parsed = feedparser.parse(response.content)
-    entries = getattr(parsed, "entries", [])
-    return entries
+    return getattr(parsed, "entries", [])
 
 
 def source_requires_review(source: dict, title: str, summary: str):
@@ -627,6 +622,9 @@ def source_requires_review(source: dict, title: str, summary: str):
         return True
 
     if len(strip_html(summary)) < 60:
+        return True
+
+    if contains_any(f"{title} {summary}", ["rumor", "unverified", "claim", "viral"]):
         return True
 
     return False
@@ -661,6 +659,7 @@ def fetch_candidates():
             continue
         if source_type != "feed":
             continue
+
         if "your-facebook-feed-or-bridge-url" in source_url:
             mark_source_result(source_name, ok=False, error="Placeholder URL detected")
             debug_errors.append(f"{source_name}: placeholder URL disabled")
@@ -779,6 +778,7 @@ async def publish_item(app: Application, item: dict):
         if FB_ENABLE_PUBLISH:
             tg_file = await bot.get_file(item["attached_file_id"])
             suffix = ".jpg" if item["attached_type"] == "photo" else ".mp4"
+
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 tmp_path = tmp.name
 
@@ -806,7 +806,7 @@ async def publish_item(app: Application, item: dict):
 
 
 # =========================================================
-# COMMAND UTIL
+# COMMAND HELPERS
 # =========================================================
 def extract_index_from_text(text: str, cmd_name: str):
     raw = (text or "").strip()
@@ -833,8 +833,8 @@ async def update_admin_pending_message(bot, item):
     if not item.get("admin_message_id"):
         return
 
-    caption = build_pending_caption(item, bot.username if bot else "")
     try:
+        caption = build_pending_caption(item)
         if item.get("image_url"):
             await bot.edit_message_caption(
                 chat_id=ADMIN_CHAT_ID,
@@ -858,22 +858,23 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not is_admin_user(update.effective_user.id):
         return
 
-    bot_username = context.bot.username or "YourBot"
+    bot_name = context.bot.username or "YourBot"
 
     await update.message.reply_text(
         "✅ Bot is running.\n\n"
         "Main commands:\n"
-        f"/fetchnow@{bot_username}\n"
-        f"/listsources@{bot_username}\n"
-        f"/pending@{bot_username}\n"
-        f"/review@{bot_username}\n"
-        f"/approved@{bot_username}\n"
-        f"/status@{bot_username}\n\n"
+        f"/fetchnow@{bot_name}\n"
+        f"/listsources@{bot_name}\n"
+        f"/pending@{bot_name}\n"
+        f"/review@{bot_name}\n"
+        f"/approved@{bot_name}\n"
+        f"/status@{bot_name}\n"
+        f"/sourceerrors@{bot_name}\n\n"
         "Approval:\n"
-        f"/approve@{bot_username} 1\n"
-        f"/reject@{bot_username} 1\n"
-        f"/skip@{bot_username} 1\n"
-        f"/editcaption@{bot_username} 1 তোমার নতুন caption\n\n"
+        f"/approve@{bot_name} 1\n"
+        f"/reject@{bot_name} 1\n"
+        f"/skip@{bot_name} 1\n"
+        f"/editcaption@{bot_name} 1 তোমার নতুন caption\n\n"
         "Reply mode:\n"
         "Pending post-এ reply করে /approve বা /skip দাও।"
     )
@@ -930,7 +931,7 @@ async def review_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     item["pending_index"] = index
-    text = build_pending_caption(item, context.bot.username or "")
+    text = build_pending_caption(item)
 
     if item.get("image_url"):
         await update.message.reply_photo(photo=item["image_url"], caption=text[:1024])
@@ -1133,6 +1134,7 @@ async def enablesource_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     sources = load_sources()
     found = False
+
     for src in sources:
         if src.get("name") == name:
             src["enabled"] = True
@@ -1161,6 +1163,7 @@ async def disablesource_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     sources = load_sources()
     found = False
+
     for src in sources:
         if src.get("name") == name:
             src["enabled"] = False
@@ -1173,6 +1176,14 @@ async def disablesource_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     save_sources(sources)
     await update.message.reply_text(f"⛔ Disabled source: {name}")
+
+
+async def resetsources_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin_user(update.effective_user.id):
+        return
+
+    reset_sources_to_default()
+    await update.message.reply_text("✅ Sources reset to DEFAULT_SOURCES.")
 
 
 async def listsources_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1191,7 +1202,7 @@ async def listsources_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fail_count = s.get("fail_count", 0)
         lines.append(
             f"- {s.get('name')} [{status}] [{mode}] [fails:{fail_count}]\n"
-            f"  {s.get('url')}"
+            f"{s.get('url')}"
         )
 
     await update.message.reply_text("Current sources:\n\n" + "\n".join(lines[:100]))
@@ -1216,6 +1227,7 @@ async def sourceerrors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"  fails: {s.get('fail_count', 0)}\n"
             f"  error: {shorten_text(s.get('last_error', ''), 180)}"
         )
+
     await update.message.reply_text("Source errors:\n\n" + "\n\n".join(lines))
 
 
@@ -1237,6 +1249,7 @@ async def fetchnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def media_attach_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not is_admin_user(update.effective_user.id):
         return
+
     if not update.message or not update.message.reply_to_message:
         return
 
@@ -1270,8 +1283,6 @@ async def collect_now(app: Application):
     auto_posted = 0
     debug_lines = [f"Candidates found: {len(candidates)}"]
 
-    bot_username = app.bot.username or ""
-
     for cand in candidates:
         if cand.get("mode") == "auto":
             try:
@@ -1282,24 +1293,24 @@ async def collect_now(app: Application):
                 add_seen_item(cand)
                 auto_posted += 1
                 debug_lines.append(f"Auto posted: {cand['source_name']} -> {cand['title'][:80]}")
+                continue
             except Exception as e:
                 cand["mode"] = "review"
                 debug_lines.append(f"Auto post fallback to review: {cand['source_name']} -> {str(e)[:120]}")
 
-        if cand.get("status") == "pending":
-            pending_count_now = len([x for x in queue if x.get("status") == "pending"]) + 1
-            cand["pending_index"] = pending_count_now
+        pending_count_now = len([x for x in queue if x.get("status") == "pending"]) + 1
+        cand["pending_index"] = pending_count_now
+        text = build_pending_caption(cand)
 
-            text = build_pending_caption(cand, bot_username)
-            if cand.get("image_url"):
-                sent = await app.bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=cand["image_url"], caption=text[:1024])
-            else:
-                sent = await app.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
+        if cand.get("image_url"):
+            sent = await app.bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=cand["image_url"], caption=text[:1024])
+        else:
+            sent = await app.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
 
-            cand["admin_message_id"] = sent.message_id
-            queue.append(cand)
-            added += 1
-            debug_lines.append(f"Added to review: {cand['source_name']} -> {cand['title'][:80]}")
+        cand["admin_message_id"] = sent.message_id
+        queue.append(cand)
+        added += 1
+        debug_lines.append(f"Added to review: {cand['source_name']} -> {cand['title'][:80]}")
 
     if source_errors:
         debug_lines.append("")
@@ -1347,6 +1358,7 @@ async def collector_loop(app: Application):
                 print(debug)
             else:
                 print("[WAIT] not collection window")
+
         except Exception as e:
             print(f"[COLLECTOR ERROR] {e}")
 
@@ -1392,6 +1404,7 @@ def main():
     app.add_handler(CommandHandler("removesource", removesource_cmd))
     app.add_handler(CommandHandler("enablesource", enablesource_cmd))
     app.add_handler(CommandHandler("disablesource", disablesource_cmd))
+    app.add_handler(CommandHandler("resetsources", resetsources_cmd))
     app.add_handler(CommandHandler("listsources", listsources_cmd))
     app.add_handler(CommandHandler("sourceerrors", sourceerrors_cmd))
     app.add_handler(CommandHandler("fetchnow", fetchnow_cmd))
