@@ -68,7 +68,7 @@ STATE_FILE = DATA_DIR / "schedule_state.json"
 SOURCES_FILE = DATA_DIR / "custom_sources.json"
 
 HTTP_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 NewsBot/4.0"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 NewsBot/5.0"
 }
 
 # =========================================================
@@ -87,7 +87,6 @@ DEFAULT_SOURCES = [
     {"name": "bdnews24 World", "url": "https://bangla.bdnews24.com/world/?getXmlFeed=true&widgetId=1215510&widgetName=rssfeed", "type": "feed", "mode": "auto"},
     {"name": "bdnews24 Business", "url": "https://bdnews24.com/business/?getXmlFeed=true&widgetId=1210&widgetName=rssfeed", "type": "feed", "mode": "auto"},
 
-    # YouTube feeds -> always review
     {"name": "BBC News YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC16niRr50-MSBwiO3YDb3RA", "type": "feed", "mode": "review"},
     {"name": "Al Jazeera English YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCNye-wNBqNL5ZzHSJj3l8Bg", "type": "feed", "mode": "review"},
     {"name": "Reuters YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UChqUTb7kYRX8-EiaN3XFrSQ", "type": "feed", "mode": "review"},
@@ -737,8 +736,7 @@ def build_pending_caption(item):
         "pending message-এ reply দিয়ে plain text পাঠালেও সেটা custom caption হিসেবে save হবে।",
     ])
 
-    full_text = "\n".join(parts)
-    return shorten_text(full_text, 4000)
+    return shorten_text("\n".join(parts), 4000)
 
 
 def build_public_caption(item):
@@ -954,16 +952,7 @@ def fetch_rss_candidates():
         source_type = source.get("type", "feed").strip().lower()
         enabled = source.get("enabled", True)
 
-        if not enabled:
-            continue
-        if not source_name or not source_url:
-            continue
-        if source_type != "feed":
-            continue
-
-        if "your-facebook-feed-or-bridge-url" in source_url:
-            mark_source_result(source_name, ok=False, error="Placeholder URL detected")
-            debug_errors.append(f"{source_name}: placeholder URL disabled")
+        if not enabled or not source_name or not source_url or source_type != "feed":
             continue
 
         try:
@@ -971,7 +960,6 @@ def fetch_rss_candidates():
             mark_source_result(source_name, ok=True)
         except Exception as e:
             error_text = str(e)
-            print(f"[ERROR] Source failed: {source_name} -> {error_text}")
             mark_source_result(source_name, ok=False, error=error_text)
             debug_errors.append(f"{source_name}: {error_text}")
             continue
@@ -1038,7 +1026,7 @@ def fetch_rss_candidates():
 
 
 # =========================================================
-# FACEBOOK SOURCE FETCH (GRAPH API)
+# FACEBOOK SOURCE FETCH
 # =========================================================
 def fetch_facebook_source_candidates():
     out = []
@@ -1068,10 +1056,7 @@ def fetch_facebook_source_candidates():
             page_name_url = f"https://graph.facebook.com/v25.0/{page_id}"
             page_resp = requests.get(
                 page_name_url,
-                params={
-                    "fields": "name",
-                    "access_token": FB_PAGE_TOKEN,
-                },
+                params={"fields": "name", "access_token": FB_PAGE_TOKEN},
                 timeout=30,
                 headers=HTTP_HEADERS,
             )
@@ -1080,13 +1065,8 @@ def fetch_facebook_source_candidates():
 
             posts_url = f"https://graph.facebook.com/v25.0/{page_id}/posts"
             fields = ",".join([
-                "id",
-                "message",
-                "story",
-                "created_time",
-                "permalink_url",
-                "full_picture",
-                "attachments{media_type,media,url,subattachments}",
+                "id", "message", "story", "created_time", "permalink_url",
+                "full_picture", "attachments{media_type,media,url,subattachments}",
             ])
             resp = requests.get(
                 posts_url,
@@ -1186,8 +1166,53 @@ def fetch_candidates():
 
 
 # =========================================================
-# FACEBOOK PUBLISH
+# FACEBOOK DEBUG / PUBLISH
 # =========================================================
+def validate_facebook_publish_config():
+    if not FB_ENABLE_PUBLISH:
+        return {"ok": False, "reason": "FB_ENABLE_PUBLISH is false"}
+
+    if not FB_PAGE_ID:
+        return {"ok": False, "reason": "FB_PAGE_ID missing"}
+
+    if not FB_PAGE_TOKEN:
+        return {"ok": False, "reason": "FB_PAGE_TOKEN missing"}
+
+    try:
+        url = f"https://graph.facebook.com/v25.0/{FB_PAGE_ID}"
+        resp = requests.get(
+            url,
+            params={
+                "fields": "id,name",
+                "access_token": FB_PAGE_TOKEN
+            },
+            timeout=30,
+            headers=HTTP_HEADERS,
+        )
+
+        data = {}
+        try:
+            data = resp.json()
+        except Exception:
+            pass
+
+        if resp.ok and data.get("id"):
+            return {
+                "ok": True,
+                "page_id": data.get("id"),
+                "page_name": data.get("name", ""),
+            }
+
+        return {
+            "ok": False,
+            "status_code": resp.status_code,
+            "response": data if data else resp.text
+        }
+
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def fb_post_text(message: str, link: str):
     if not (FB_ENABLE_PUBLISH and FB_PAGE_ID and FB_PAGE_TOKEN):
         return {"ok": False, "error": "Facebook publish disabled or missing credentials"}
@@ -1199,16 +1224,23 @@ def fb_post_text(message: str, link: str):
         "access_token": FB_PAGE_TOKEN
     }
 
-    response = requests.post(url, data=payload, timeout=60, headers=HTTP_HEADERS)
+    try:
+        response = requests.post(url, data=payload, timeout=60, headers=HTTP_HEADERS)
+        try:
+            data = response.json()
+        except Exception:
+            data = {"raw_text": response.text}
 
-    if response.ok:
-        return {"ok": True, "data": response.json()}
+        if response.ok:
+            return {"ok": True, "data": data}
 
-    return {
-        "ok": False,
-        "status_code": response.status_code,
-        "error": response.text
-    }
+        return {
+            "ok": False,
+            "status_code": response.status_code,
+            "error": data
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def fb_post_photo(file_path: str, caption: str):
@@ -1216,23 +1248,31 @@ def fb_post_photo(file_path: str, caption: str):
         return {"ok": False, "error": "Facebook publish disabled or missing credentials"}
 
     url = f"https://graph.facebook.com/v25.0/{FB_PAGE_ID}/photos"
-    with open(file_path, "rb") as f:
-        response = requests.post(
-            url,
-            data={"caption": caption, "access_token": FB_PAGE_TOKEN},
-            files={"source": f},
-            timeout=120,
-            headers=HTTP_HEADERS
-        )
+    try:
+        with open(file_path, "rb") as f:
+            response = requests.post(
+                url,
+                data={"caption": caption, "access_token": FB_PAGE_TOKEN},
+                files={"source": f},
+                timeout=120,
+                headers=HTTP_HEADERS
+            )
 
-    if response.ok:
-        return {"ok": True, "data": response.json()}
+        try:
+            data = response.json()
+        except Exception:
+            data = {"raw_text": response.text}
 
-    return {
-        "ok": False,
-        "status_code": response.status_code,
-        "error": response.text
-    }
+        if response.ok:
+            return {"ok": True, "data": data}
+
+        return {
+            "ok": False,
+            "status_code": response.status_code,
+            "error": data
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def fb_post_video(file_path: str, caption: str):
@@ -1240,23 +1280,31 @@ def fb_post_video(file_path: str, caption: str):
         return {"ok": False, "error": "Facebook publish disabled or missing credentials"}
 
     url = f"https://graph.facebook.com/v25.0/{FB_PAGE_ID}/videos"
-    with open(file_path, "rb") as f:
-        response = requests.post(
-            url,
-            data={"description": caption, "access_token": FB_PAGE_TOKEN},
-            files={"source": f},
-            timeout=300,
-            headers=HTTP_HEADERS
-        )
+    try:
+        with open(file_path, "rb") as f:
+            response = requests.post(
+                url,
+                data={"description": caption, "access_token": FB_PAGE_TOKEN},
+                files={"source": f},
+                timeout=300,
+                headers=HTTP_HEADERS
+            )
 
-    if response.ok:
-        return {"ok": True, "data": response.json()}
+        try:
+            data = response.json()
+        except Exception:
+            data = {"raw_text": response.text}
 
-    return {
-        "ok": False,
-        "status_code": response.status_code,
-        "error": response.text
-    }
+        if response.ok:
+            return {"ok": True, "data": data}
+
+        return {
+            "ok": False,
+            "status_code": response.status_code,
+            "error": data
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 # =========================================================
@@ -1265,7 +1313,7 @@ def fb_post_video(file_path: str, caption: str):
 async def publish_item(app: Application, item: dict):
     bot = app.bot
     caption = build_public_caption(item)
-    fb_result = {"ok": True}
+    fb_result = {"ok": True, "note": "Facebook disabled"}
 
     if item.get("attached_type") and item.get("attached_file_id"):
         if item["attached_type"] == "photo":
@@ -1395,7 +1443,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/approved@{bot_name}\n"
         f"/status@{bot_name}\n"
         f"/sourceerrors@{bot_name}\n"
-        f"/resetsources@{bot_name}\n\n"
+        f"/resetsources@{bot_name}\n"
+        f"/fbtest@{bot_name}\n\n"
         "Approval:\n"
         f"/approve@{bot_name} 1\n"
         f"/reject@{bot_name} 1\n"
@@ -1403,8 +1452,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/editcaption@{bot_name} 1 তোমার নতুন caption\n"
         f"/editsummary@{bot_name} 1 তোমার নতুন caption\n\n"
         "Reply mode:\n"
-        "Pending post-এ reply করে plain text পাঠালে সেটা custom caption হিসেবে save হবে।\n"
-        "তারপর /approve দিলেই publish হবে।"
+        "Pending post-এ reply করে plain text পাঠালেও সেটা custom caption হিসেবে save হবে।"
     )
 
 
@@ -1423,6 +1471,14 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     disabled = [s for s in sources if not s.get("enabled", True)]
     yt_pending = [x for x in pending if x.get("is_youtube")]
 
+    fb_check = validate_facebook_publish_config()
+    fb_line = "OFF"
+    if FB_ENABLE_PUBLISH:
+        if fb_check.get("ok"):
+            fb_line = f"ON ✅ ({fb_check.get('page_name', '')})"
+        else:
+            fb_line = f"ON but error ❌"
+
     await update.message.reply_text(
         "📊 Queue status:\n"
         f"Pending: {len(pending)}\n"
@@ -1432,9 +1488,25 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Skipped: {len(skipped)}\n"
         f"Sources enabled: {len(enabled)}\n"
         f"Sources disabled: {len(disabled)}\n"
-        f"Facebook publish: {'ON' if FB_ENABLE_PUBLISH else 'OFF'}\n"
+        f"Facebook publish: {fb_line}\n"
         f"Facebook source: {'ON' if FB_ENABLE_SOURCE else 'OFF'}"
     )
+
+
+async def fbtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin_user(update.effective_user.id):
+        return
+
+    validation = validate_facebook_publish_config()
+    result = fb_post_text("Test post from bot", "https://example.com")
+
+    text = (
+        "FB VALIDATION:\n"
+        f"{shorten_text(json.dumps(validation, ensure_ascii=False), 1500)}\n\n"
+        "FB POST RESULT:\n"
+        f"{shorten_text(json.dumps(result, ensure_ascii=False), 2500)}"
+    )
+    await update.message.reply_text(text[:4000])
 
 
 async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1510,7 +1582,7 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if fb_result and not fb_result.get("ok", False):
                 await update.message.reply_text(
                     "⚠️ Telegram-এ post হয়েছে, কিন্তু Facebook publish fail করেছে.\n\n"
-                    f"Error:\n{shorten_text(str(fb_result.get('error', 'Unknown error')), 1200)}"
+                    f"{shorten_text(json.dumps(fb_result, ensure_ascii=False), 3500)}"
                 )
             else:
                 await update.message.reply_text("✅ Facebook page-এও post হয়েছে।")
@@ -1782,7 +1854,7 @@ async def listsources_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("")
         lines.append(f"Facebook source pages: {', '.join(FB_SOURCE_PAGE_IDS) if FB_SOURCE_PAGE_IDS else 'none'}")
 
-    await update.message.reply_text("Current sources:\n\n" + "\n".join(lines[:3500]))
+    await update.message.reply_text(("Current sources:\n\n" + "\n".join(lines))[:4000])
 
 
 async def sourceerrors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1808,7 +1880,7 @@ async def sourceerrors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No source errors.")
         return
 
-    await update.message.reply_text("Source errors:\n\n" + "\n\n".join(lines[:3500]))
+    await update.message.reply_text(("Source errors:\n\n" + "\n\n".join(lines))[:4000])
 
 
 async def fetchnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1821,7 +1893,7 @@ async def fetchnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = f"✅ Fetch done.\nAdded to pending: {added}\nAuto posted: {auto_posted}"
         if debug:
             msg += f"\n\nDebug:\n{debug[:3000]}"
-        await update.message.reply_text(msg)
+        await update.message.reply_text(msg[:4000])
     except Exception as e:
         await update.message.reply_text(f"❌ Fetch failed: {e}")
 
@@ -1866,10 +1938,7 @@ async def reply_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     text = (update.message.text or "").strip()
-    if not text:
-        return
-
-    if text.startswith("/"):
+    if not text or text.startswith("/"):
         return
 
     item["custom_caption"] = text
@@ -1903,7 +1972,7 @@ async def collect_now(app: Application):
 
                 if FB_ENABLE_PUBLISH and fb_result and not fb_result.get("ok", False):
                     debug_lines.append(
-                        f"Auto posted to Telegram but Facebook failed: {cand['source_name']} -> {cand['title'][:80]}"
+                        f"Auto posted TG but FB failed: {cand['source_name']} -> {cand['title'][:80]} -> {shorten_text(json.dumps(fb_result, ensure_ascii=False), 250)}"
                     )
                 else:
                     debug_lines.append(f"Auto posted: {cand['source_name']} -> {cand['title'][:80]}")
@@ -1994,6 +2063,8 @@ def main():
     if not ADMIN_CHAT_ID:
         raise ValueError("ADMIN_CHAT_ID is missing or invalid")
 
+    fb_check = validate_facebook_publish_config()
+
     print("===================================")
     print("Bot starting...")
     print(f"Public Channel: {PUBLIC_CHANNEL_ID}")
@@ -2004,12 +2075,14 @@ def main():
     print(f"Facebook source enabled: {FB_ENABLE_SOURCE}")
     print(f"Facebook source pages: {FB_SOURCE_PAGE_IDS}")
     print(f"Show source link: {SHOW_SOURCE_LINK}")
+    print(f"Facebook validation: {json.dumps(fb_check, ensure_ascii=False)}")
     print("===================================")
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("fbtest", fbtest_cmd))
     app.add_handler(CommandHandler("pending", pending_cmd))
     app.add_handler(CommandHandler("review", review_cmd))
     app.add_handler(CommandHandler("approved", approved_cmd))
@@ -2026,7 +2099,6 @@ def main():
     app.add_handler(CommandHandler("listsources", listsources_cmd))
     app.add_handler(CommandHandler("sourceerrors", sourceerrors_cmd))
     app.add_handler(CommandHandler("fetchnow", fetchnow_cmd))
-
     app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO), media_attach_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reply_text_handler))
 
