@@ -52,12 +52,14 @@ FB_SOURCE_PAGE_IDS_RAW = os.getenv("FB_SOURCE_PAGE_IDS", "").strip()
 FB_SOURCE_PAGE_IDS = [x.strip() for x in FB_SOURCE_PAGE_IDS_RAW.split(",") if x.strip()]
 FB_MAX_ITEMS = int(os.getenv("FB_MAX_ITEMS", "5"))
 
-# Telegram promo / branding
+# Branding / Footer
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "").strip()  # example: @GlobalTechPulse
 CHANNEL_JOIN_TEXT = os.getenv(
     "CHANNEL_JOIN_TEXT",
     "📢 আরও full summary ও দ্রুত আপডেট পেতে join করুন:"
 ).strip()
+
+SHOW_SOURCE_LINK = os.getenv("SHOW_SOURCE_LINK", "false").strip().lower() == "true"
 
 DATA_DIR = Path(".")
 SEEN_FILE = DATA_DIR / "seen_items.json"
@@ -81,7 +83,7 @@ DEFAULT_SOURCES = [
     {"name": "bdnews24 World", "url": "https://bangla.bdnews24.com/world/?getXmlFeed=true&widgetId=1215510&widgetName=rssfeed", "type": "feed", "mode": "auto"},
     {"name": "bdnews24 Business", "url": "https://bdnews24.com/business/?getXmlFeed=true&widgetId=1210&widgetName=rssfeed", "type": "feed", "mode": "auto"},
 
-    # YouTube news feeds
+    # YouTube feeds
     {"name": "BBC News YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC16niRr50-MSBwiO3YDb3RA", "type": "feed", "mode": "auto"},
     {"name": "Al Jazeera English YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCNye-wNBqNL5ZzHSJj3l8Bg", "type": "feed", "mode": "auto"},
     {"name": "Reuters YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UChqUTb7kYRX8-EiaN3XFrSQ", "type": "feed", "mode": "auto"},
@@ -121,7 +123,6 @@ BORING_KEYWORDS = [
     "subscribe now", "investor presentation", "earnings call",
     "quarterly report", "shareholder", "promo", "podcast", "livestream"
 ]
-
 
 # =========================================================
 # JSON HELPERS
@@ -209,12 +210,9 @@ def get_join_footer():
 # =========================================================
 def clean_news_text(text: str):
     text = strip_html(text or "")
-
-    # Remove URLs
     text = re.sub(r"https?://\S+", " ", text)
-
-    # Remove hashtags
     text = re.sub(r"#\w+", " ", text)
+    text = re.sub(r"[|•▪️■●▶️◆►]+", " ", text)
 
     promo_patterns = [
         r"subscribe.*",
@@ -226,10 +224,10 @@ def clean_news_text(text: str):
         r"visit.*website.*",
         r"our instagram.*",
         r"our facebook.*",
-        r"twitter\.com.*",
-        r"youtube\.com.*",
-        r"facebook\.com.*",
-        r"instagram\.com.*",
+        r"twitter.*",
+        r"youtube.*subscribe.*",
+        r"facebook.*follow.*",
+        r"instagram.*",
         r"channel follow.*",
         r"আরও full summary.*",
         r"আমাদের.*ফলো.*",
@@ -238,29 +236,36 @@ def clean_news_text(text: str):
         r"ফেসবুকে আমাদের.*",
         r"ইনস্টাগ্রাম.*",
         r"ডিসক্লেইমার.*",
-        r"fair use.*",
+        r"published by.*",
+        r"for more.*",
+        r"click here.*",
+        r"visit now.*",
     ]
 
-    lines = re.split(r"[\n\r]+", text)
-    cleaned_lines = []
+    sentences = re.split(r"(?<=[.!?।])\s+|\n+", text)
+    cleaned = []
 
-    for line in lines:
-        l = line.strip()
-        if not l:
+    for s in sentences:
+        s = s.strip()
+        if not s:
             continue
 
-        l_lower = l.lower()
+        low = s.lower()
         blocked = False
         for pattern in promo_patterns:
-            if re.search(pattern, l_lower):
+            if re.search(pattern, low):
                 blocked = True
                 break
 
-        if not blocked:
-            cleaned_lines.append(l)
+        if blocked:
+            continue
 
-    text = " ".join(cleaned_lines)
-    text = re.sub(r"[|•▪️■●▶️]+", " ", text)
+        if len(s) < 8:
+            continue
+
+        cleaned.append(s)
+
+    text = " ".join(cleaned)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
@@ -274,13 +279,14 @@ def extract_useful_sentences(text: str, limit=4):
         p = p.strip()
         if not p:
             continue
-        if len(p) < 35:
+        if len(p) < 30:
             continue
 
         low = p.lower()
         if any(x in low for x in [
             "subscribe", "follow", "fair use", "disclaimer",
-            "watch", "instagram", "facebook", "youtube", "twitter"
+            "watch", "instagram", "facebook", "youtube", "twitter",
+            "for more", "click here", "visit"
         ]):
             continue
 
@@ -520,7 +526,7 @@ def make_english_summary(title, summary):
         return shorten_text(title, 300)
 
     final_text = " ".join(sentences)
-    return shorten_text(final_text, 600)
+    return shorten_text(final_text, 500)
 
 
 def make_bangla_summary(title, summary, source_name):
@@ -558,20 +564,31 @@ def build_pending_caption(item):
         else:
             header = "📱 PENDING: Tech"
 
-    return (
-        f"{header}\n"
-        f"ID: {idx}\n"
-        f"Mode: {mode}\n\n"
-        f"Title: {title}\n\n"
-        f"{make_bangla_summary(title, summary, source_name)}\n\n"
-        f"Source: {source_name}\n"
-        f"{link}\n\n"
-        f"Action:\n"
-        f"/approve {idx}\n"
-        f"/reject {idx}\n"
-        f"/skip {idx}\n"
-        f"/editcaption {idx} তোমার নতুন caption"
-    )
+    parts = [
+        header,
+        f"ID: {idx}",
+        f"Mode: {mode}",
+        "",
+        f"Title: {title}",
+        "",
+        make_bangla_summary(title, summary, source_name),
+        "",
+        f"Source: {source_name}",
+    ]
+
+    if link:
+        parts.append(link)
+
+    parts.extend([
+        "",
+        "Action:",
+        f"/approve {idx}",
+        f"/reject {idx}",
+        f"/skip {idx}",
+        f"/editcaption {idx} তোমার নতুন caption",
+    ])
+
+    return "\n".join(parts)
 
 
 def build_public_caption(item):
@@ -582,13 +599,15 @@ def build_public_caption(item):
 
     if item.get("custom_caption"):
         custom = clean_news_text(item["custom_caption"])
-        footer = get_join_footer()
-
         parts = [custom]
+
         if source_name:
             parts.append(f"🌐 Source: {source_name}")
-        if link:
+
+        if SHOW_SOURCE_LINK and link:
             parts.append(f"🔗 {link}")
+
+        footer = get_join_footer()
         if footer:
             parts.append(footer)
 
@@ -611,10 +630,12 @@ def build_public_caption(item):
         header,
         title,
         bangla_summary,
-        f"🌐 Source: {source_name}",
     ]
 
-    if link:
+    if source_name:
+        parts.append(f"🌐 Source: {source_name}")
+
+    if SHOW_SOURCE_LINK and link:
         parts.append(f"🔗 {link}")
 
     footer = get_join_footer()
@@ -633,7 +654,7 @@ def generate_reel_script(item):
         "🎥 REELS SCRIPT\n\n"
         f"Hook:\nআজকের সবচেয়ে বড় খবর — {title}\n\n"
         f"Body:\n{short_summary}\n\n"
-        f"CTA:\nআরও full summary পেতে channel follow করুন।"
+        f"CTA:\nআরও full summary পেতে follow করুন: {CHANNEL_USERNAME if CHANNEL_USERNAME else 'আমাদের channel'}"
     )
 
 
@@ -1067,15 +1088,24 @@ async def publish_item(app: Application, item: dict):
 
     if item.get("attached_type") and item.get("attached_file_id"):
         if item["attached_type"] == "photo":
-            await bot.send_photo(chat_id=PUBLIC_CHANNEL_ID, photo=item["attached_file_ID"] if False else item["attached_file_id"], caption=caption[:1024])
+            await bot.send_photo(
+                chat_id=PUBLIC_CHANNEL_ID,
+                photo=item["attached_file_id"],
+                caption=caption[:1024]
+            )
         elif item["attached_type"] == "video":
-            await bot.send_video(chat_id=PUBLIC_CHANNEL_ID, video=item["attached_file_id"], caption=caption[:1024])
+            await bot.send_video(
+                chat_id=PUBLIC_CHANNEL_ID,
+                video=item["attached_file_id"],
+                caption=caption[:1024]
+            )
 
         if FB_ENABLE_PUBLISH:
             tg_file = await bot.get_file(item["attached_file_id"])
             suffix = ".jpg" if item["attached_type"] == "photo" else ".mp4"
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 tmp_path = tmp.name
+
             await tg_file.download_to_drive(custom_path=tmp_path)
 
             try:
@@ -1093,7 +1123,11 @@ async def publish_item(app: Application, item: dict):
 
     if item.get("video_url") and is_probably_video_link(item["video_url"]):
         try:
-            await bot.send_video(chat_id=PUBLIC_CHANNEL_ID, video=item["video_url"], caption=caption[:1024])
+            await bot.send_video(
+                chat_id=PUBLIC_CHANNEL_ID,
+                video=item["video_url"],
+                caption=caption[:1024]
+            )
             if FB_ENABLE_PUBLISH:
                 fb_result = fb_post_text(caption, item["link"])
             return fb_result
@@ -1101,7 +1135,11 @@ async def publish_item(app: Application, item: dict):
             pass
 
     if item.get("image_url"):
-        await bot.send_photo(chat_id=PUBLIC_CHANNEL_ID, photo=item["image_url"], caption=caption[:1024])
+        await bot.send_photo(
+            chat_id=PUBLIC_CHANNEL_ID,
+            photo=item["image_url"],
+            caption=caption[:1024]
+        )
     else:
         await bot.send_message(chat_id=PUBLIC_CHANNEL_ID, text=caption)
 
@@ -1716,6 +1754,7 @@ def main():
     print(f"Facebook publish enabled: {FB_ENABLE_PUBLISH}")
     print(f"Facebook source enabled: {FB_ENABLE_SOURCE}")
     print(f"Facebook source pages: {FB_SOURCE_PAGE_IDS}")
+    print(f"Show source link: {SHOW_SOURCE_LINK}")
     print("===================================")
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
