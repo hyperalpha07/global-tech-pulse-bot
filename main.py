@@ -205,6 +205,93 @@ def get_join_footer():
 
 
 # =========================================================
+# CLEAN SUMMARY HELPERS
+# =========================================================
+def clean_news_text(text: str):
+    text = strip_html(text or "")
+
+    # Remove URLs
+    text = re.sub(r"https?://\S+", " ", text)
+
+    # Remove hashtags
+    text = re.sub(r"#\w+", " ", text)
+
+    promo_patterns = [
+        r"subscribe.*",
+        r"follow.*",
+        r"join.*channel.*",
+        r"fair use.*",
+        r"disclaimer.*",
+        r"watch.*video.*",
+        r"visit.*website.*",
+        r"our instagram.*",
+        r"our facebook.*",
+        r"twitter\.com.*",
+        r"youtube\.com.*",
+        r"facebook\.com.*",
+        r"instagram\.com.*",
+        r"channel follow.*",
+        r"আরও full summary.*",
+        r"আমাদের.*ফলো.*",
+        r"আমাদের.*সাবস্ক্রাইব.*",
+        r"ভিডিও দেখতে.*",
+        r"ফেসবুকে আমাদের.*",
+        r"ইনস্টাগ্রাম.*",
+        r"ডিসক্লেইমার.*",
+        r"fair use.*",
+    ]
+
+    lines = re.split(r"[\n\r]+", text)
+    cleaned_lines = []
+
+    for line in lines:
+        l = line.strip()
+        if not l:
+            continue
+
+        l_lower = l.lower()
+        blocked = False
+        for pattern in promo_patterns:
+            if re.search(pattern, l_lower):
+                blocked = True
+                break
+
+        if not blocked:
+            cleaned_lines.append(l)
+
+    text = " ".join(cleaned_lines)
+    text = re.sub(r"[|•▪️■●▶️]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def extract_useful_sentences(text: str, limit=4):
+    text = clean_news_text(text)
+    parts = re.split(r"(?<=[.!?।])\s+", text)
+
+    useful = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        if len(p) < 35:
+            continue
+
+        low = p.lower()
+        if any(x in low for x in [
+            "subscribe", "follow", "fair use", "disclaimer",
+            "watch", "instagram", "facebook", "youtube", "twitter"
+        ]):
+            continue
+
+        useful.append(p)
+        if len(useful) >= limit:
+            break
+
+    return useful
+
+
+# =========================================================
 # SOURCES
 # =========================================================
 def normalize_source(source: dict):
@@ -423,36 +510,23 @@ def to_bangla(text):
 
 
 def make_english_summary(title, summary):
-    title = strip_html(title)
-    summary = strip_html(summary)
+    title = clean_news_text(title)
+    summary = clean_news_text(summary)
 
-    if not summary:
-        return shorten_text(title, 350)
+    combined = f"{title}. {summary}".strip()
+    sentences = extract_useful_sentences(combined, limit=4)
 
-    text = f"{title}. {summary}"
-    text = strip_html(text)
+    if not sentences:
+        return shorten_text(title, 300)
 
-    parts = re.split(r"(?<=[.!?])\s+", text)
-    useful_parts = []
-    for p in parts:
-        p = p.strip()
-        if not p:
-            continue
-        if len(p) < 25:
-            continue
-        useful_parts.append(p)
-        if len(" ".join(useful_parts)) >= 700:
-            break
-
-    if not useful_parts:
-        return shorten_text(text, 700)
-
-    return shorten_text(" ".join(useful_parts), 700)
+    final_text = " ".join(sentences)
+    return shorten_text(final_text, 600)
 
 
 def make_bangla_summary(title, summary, source_name):
     english = make_english_summary(title, summary)
-    translated = shorten_text(to_bangla(english), 1200)
+    translated = shorten_text(to_bangla(english), 900)
+
     category = classify_news(title, summary, source_name)
 
     if category == "bangladesh":
@@ -466,10 +540,10 @@ def make_bangla_summary(title, summary, source_name):
 
 
 def build_pending_caption(item):
-    title = strip_html(item["title"])
-    summary = strip_html(item["summary"])
-    source_name = strip_html(item["source_name"])
-    link = item["link"]
+    title = clean_news_text(item.get("title", ""))
+    summary = clean_news_text(item.get("summary", ""))
+    source_name = strip_html(item.get("source_name", "Unknown Source"))
+    link = item.get("link", "").strip()
     idx = item.get("pending_index", "?")
     mode = item.get("mode", "review")
 
@@ -496,21 +570,30 @@ def build_pending_caption(item):
         f"/approve {idx}\n"
         f"/reject {idx}\n"
         f"/skip {idx}\n"
-        f"/editcaption {idx} তোমার নতুন caption\n\n"
-        f"Reply করেও /approve বা /skip দিতে পারো।"
+        f"/editcaption {idx} তোমার নতুন caption"
     )
 
 
 def build_public_caption(item):
-    if item.get("custom_caption"):
-        caption = item["custom_caption"].strip()
-        footer = get_join_footer()
-        return f"{caption}\n\n{footer}".strip() if footer else caption
+    title = clean_news_text(item.get("title", ""))
+    summary = clean_news_text(item.get("summary", ""))
+    source_name = strip_html(item.get("source_name", "Unknown Source"))
+    link = item.get("link", "").strip()
 
-    title = strip_html(item["title"])
-    summary = strip_html(item["summary"])
-    source_name = strip_html(item["source_name"])
-    link = item["link"]
+    if item.get("custom_caption"):
+        custom = clean_news_text(item["custom_caption"])
+        footer = get_join_footer()
+
+        parts = [custom]
+        if source_name:
+            parts.append(f"🌐 Source: {source_name}")
+        if link:
+            parts.append(f"🔗 {link}")
+        if footer:
+            parts.append(footer)
+
+        return "\n\n".join(parts)
+
     bangla_summary = make_bangla_summary(title, summary, source_name)
 
     if is_breaking_news(title, summary):
@@ -522,30 +605,29 @@ def build_public_caption(item):
         elif category == "world":
             header = "🌍 বিশ্বের জরুরি খবর"
         else:
-            header = "📱 AI / Gadget / Tech Update"
+            header = "📱 টেক আপডেট"
 
     parts = [
         header,
-        "",
         title,
-        "",
         bangla_summary,
-        "",
         f"🌐 Source: {source_name}",
-        f"🔗 {link}",
     ]
+
+    if link:
+        parts.append(f"🔗 {link}")
 
     footer = get_join_footer()
     if footer:
-        parts.extend(["", footer])
+        parts.append(footer)
 
-    return "\n".join(parts)
+    return "\n\n".join(parts)
 
 
 def generate_reel_script(item):
-    title = strip_html(item["title"])
-    summary = strip_html(item["summary"])
-    short_summary = shorten_text(strip_html(summary), 220)
+    title = clean_news_text(item.get("title", ""))
+    summary = clean_news_text(item.get("summary", ""))
+    short_summary = shorten_text(summary, 180)
 
     return (
         "🎥 REELS SCRIPT\n\n"
@@ -561,7 +643,7 @@ def format_pending_list(items):
 
     lines = ["🟡 Pending approvals:\n"]
     for idx, item in items:
-        title = shorten_text(strip_html(item.get("title", "")), 90)
+        title = shorten_text(clean_news_text(item.get("title", "")), 90)
         source = strip_html(item.get("source_name", "Unknown"))
         mode = item.get("mode", "review")
         lines.append(f"{idx}. [{mode}] {title}\n   Source: {source}")
@@ -576,7 +658,7 @@ def format_approved_list(items):
     latest = list(reversed(items))[:20]
     lines = ["✅ Approved items:\n"]
     for idx, item in enumerate(latest, start=1):
-        title = shorten_text(strip_html(item.get("title", "")), 90)
+        title = shorten_text(clean_news_text(item.get("title", "")), 90)
         source = strip_html(item.get("source_name", "Unknown"))
         approved_at = item.get("approved_at", "")[:19].replace("T", " ")
         lines.append(f"{idx}. {title}\n   Source: {source}\n   At: {approved_at}")
@@ -886,7 +968,6 @@ def fetch_candidates():
     all_items = rss_items + fb_items
     all_items.sort(key=lambda x: x["score"], reverse=True)
 
-    # stronger dedupe inside same batch
     unique_items = []
     seen_batch_links = set()
     seen_batch_titles = []
@@ -984,10 +1065,9 @@ async def publish_item(app: Application, item: dict):
     caption = build_public_caption(item)
     fb_result = {"ok": True}
 
-    # Admin attached media gets highest priority
     if item.get("attached_type") and item.get("attached_file_id"):
         if item["attached_type"] == "photo":
-            await bot.send_photo(chat_id=PUBLIC_CHANNEL_ID, photo=item["attached_file_id"], caption=caption[:1024])
+            await bot.send_photo(chat_id=PUBLIC_CHANNEL_ID, photo=item["attached_file_ID"] if False else item["attached_file_id"], caption=caption[:1024])
         elif item["attached_type"] == "video":
             await bot.send_video(chat_id=PUBLIC_CHANNEL_ID, video=item["attached_file_id"], caption=caption[:1024])
 
@@ -1011,7 +1091,6 @@ async def publish_item(app: Application, item: dict):
 
         return fb_result
 
-    # Direct source video URL if available
     if item.get("video_url") and is_probably_video_link(item["video_url"]):
         try:
             await bot.send_video(chat_id=PUBLIC_CHANNEL_ID, video=item["video_url"], caption=caption[:1024])
@@ -1021,7 +1100,6 @@ async def publish_item(app: Application, item: dict):
         except Exception:
             pass
 
-    # Image / thumbnail
     if item.get("image_url"):
         await bot.send_photo(chat_id=PUBLIC_CHANNEL_ID, photo=item["image_url"], caption=caption[:1024])
     else:
