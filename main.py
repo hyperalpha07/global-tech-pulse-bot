@@ -6,9 +6,11 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from urllib.parse import urlparse
 
 import feedparser
 import requests
+from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
 from telegram import Update
 from telegram.ext import (
@@ -46,26 +48,28 @@ FB_ENABLE_PUBLISH = os.getenv("FB_ENABLE_PUBLISH", "false").strip().lower() == "
 FB_PAGE_ID = os.getenv("FB_PAGE_ID", "").strip()
 FB_PAGE_TOKEN = os.getenv("FB_PAGE_TOKEN", "").strip()
 
-# Facebook source fetch
 FB_ENABLE_SOURCE = os.getenv("FB_ENABLE_SOURCE", "false").strip().lower() == "true"
 FB_SOURCE_PAGE_IDS_RAW = os.getenv("FB_SOURCE_PAGE_IDS", "").strip()
 FB_SOURCE_PAGE_IDS = [x.strip() for x in FB_SOURCE_PAGE_IDS_RAW.split(",") if x.strip()]
 FB_MAX_ITEMS = int(os.getenv("FB_MAX_ITEMS", "5"))
 
-# Branding / Footer
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "").strip()  # example: @GlobalTechPulse
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "").strip()
 CHANNEL_JOIN_TEXT = os.getenv(
     "CHANNEL_JOIN_TEXT",
     "📢 আরও full summary ও দ্রুত আপডেট পেতে join করুন:"
 ).strip()
 
-SHOW_SOURCE_LINK = os.getenv("SHOW_SOURCE_LINK", "false").strip().lower() == "true"
+SHOW_SOURCE_LINK = os.getenv("SHOW_SOURCE_LINK", "true").strip().lower() == "true"
 
 DATA_DIR = Path(".")
 SEEN_FILE = DATA_DIR / "seen_items.json"
 QUEUE_FILE = DATA_DIR / "review_queue.json"
 STATE_FILE = DATA_DIR / "schedule_state.json"
 SOURCES_FILE = DATA_DIR / "custom_sources.json"
+
+HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 NewsBot/4.0"
+}
 
 # =========================================================
 # DEFAULT SOURCES
@@ -83,13 +87,13 @@ DEFAULT_SOURCES = [
     {"name": "bdnews24 World", "url": "https://bangla.bdnews24.com/world/?getXmlFeed=true&widgetId=1215510&widgetName=rssfeed", "type": "feed", "mode": "auto"},
     {"name": "bdnews24 Business", "url": "https://bdnews24.com/business/?getXmlFeed=true&widgetId=1210&widgetName=rssfeed", "type": "feed", "mode": "auto"},
 
-    # YouTube feeds
-    {"name": "BBC News YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC16niRr50-MSBwiO3YDb3RA", "type": "feed", "mode": "auto"},
-    {"name": "Al Jazeera English YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCNye-wNBqNL5ZzHSJj3l8Bg", "type": "feed", "mode": "auto"},
-    {"name": "Reuters YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UChqUTb7kYRX8-EiaN3XFrSQ", "type": "feed", "mode": "auto"},
-    {"name": "DW News YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCknLrEdhRCp1aegoMqRaCZg", "type": "feed", "mode": "auto"},
-    {"name": "Jamuna TV YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCN6sm8iHiPd0cnoUardDAnA", "type": "feed", "mode": "auto"},
-    {"name": "Somoy TV YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCxHoBXkY88Tb8z1Ssj6CWsQ", "type": "feed", "mode": "auto"},
+    # YouTube feeds -> always review
+    {"name": "BBC News YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC16niRr50-MSBwiO3YDb3RA", "type": "feed", "mode": "review"},
+    {"name": "Al Jazeera English YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCNye-wNBqNL5ZzHSJj3l8Bg", "type": "feed", "mode": "review"},
+    {"name": "Reuters YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UChqUTb7kYRX8-EiaN3XFrSQ", "type": "feed", "mode": "review"},
+    {"name": "DW News YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCknLrEdhRCp1aegoMqRaCZg", "type": "feed", "mode": "review"},
+    {"name": "Jamuna TV YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCN6sm8iHiPd0cnoUardDAnA", "type": "feed", "mode": "review"},
+    {"name": "Somoy TV YouTube", "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCxHoBXkY88Tb8z1Ssj6CWsQ", "type": "feed", "mode": "review"},
 ]
 
 BANGLADESH_KEYWORDS = [
@@ -158,7 +162,7 @@ POST_HOURS = parse_post_hours(POST_HOURS_RAW)
 
 
 def strip_html(raw_text):
-    text = re.sub(r"<.*?>", "", raw_text or "")
+    text = re.sub(r"<.*?>", " ", raw_text or "")
     text = re.sub(r"&nbsp;?", " ", text)
     text = re.sub(r"&amp;", "&", text)
     text = text.replace("\n", " ").replace("\r", " ").replace("\t", " ").strip()
@@ -203,6 +207,23 @@ def get_join_footer():
     if CHANNEL_USERNAME:
         return f"{CHANNEL_JOIN_TEXT}\n{CHANNEL_USERNAME}"
     return ""
+
+
+def is_youtube_url(url: str):
+    u = (url or "").lower()
+    return "youtube.com" in u or "youtu.be" in u
+
+
+def is_youtube_source_name(name: str):
+    return "youtube" in (name or "").lower()
+
+
+def get_domain_from_url(url: str):
+    try:
+        parsed = urlparse(url)
+        return parsed.netloc.replace("www.", "").strip()
+    except Exception:
+        return ""
 
 
 # =========================================================
@@ -295,6 +316,77 @@ def extract_useful_sentences(text: str, limit=4):
             break
 
     return useful
+
+
+# =========================================================
+# ARTICLE EXTRACTION
+# =========================================================
+def fetch_article_text_from_url(url: str):
+    try:
+        resp = requests.get(url, timeout=25, headers=HTTP_HEADERS)
+        resp.raise_for_status()
+
+        content_type = resp.headers.get("content-type", "").lower()
+        if "text/html" not in content_type:
+            return ""
+
+        html = resp.text
+        soup = BeautifulSoup(html, "html.parser")
+
+        for tag in soup(["script", "style", "noscript", "iframe", "svg", "form", "header", "footer", "nav", "aside"]):
+            tag.decompose()
+
+        meta_parts = []
+
+        for attr_name, attr_val in [
+            ("property", "og:description"),
+            ("name", "description"),
+            ("name", "twitter:description"),
+        ]:
+            tag = soup.find("meta", attrs={attr_name: attr_val})
+            if tag and tag.get("content"):
+                meta_parts.append(tag.get("content", "").strip())
+
+        article_text_parts = []
+
+        selectors = [
+            "article",
+            "main",
+            '[role="main"]',
+            ".article-content",
+            ".entry-content",
+            ".story-body",
+            ".post-content",
+            ".content",
+        ]
+
+        for selector in selectors:
+            nodes = soup.select(selector)
+            for node in nodes:
+                paragraphs = node.find_all(["p", "h2", "h3", "li"])
+                for p in paragraphs:
+                    txt = strip_html(p.get_text(" ", strip=True))
+                    if len(txt) >= 40:
+                        article_text_parts.append(txt)
+
+            if article_text_parts:
+                break
+
+        if not article_text_parts:
+            paragraphs = soup.find_all("p")
+            for p in paragraphs[:25]:
+                txt = strip_html(p.get_text(" ", strip=True))
+                if len(txt) >= 40:
+                    article_text_parts.append(txt)
+
+        final_parts = meta_parts + article_text_parts
+        final_text = " ".join(final_parts)
+        final_text = clean_news_text(final_text)
+
+        return shorten_text(final_text, 2500)
+
+    except Exception:
+        return ""
 
 
 # =========================================================
@@ -515,23 +607,53 @@ def to_bangla(text):
         return text
 
 
-def make_english_summary(title, summary):
+def is_summary_too_weak(title: str, summary: str):
+    s = clean_news_text(summary or "")
+    t = clean_news_text(title or "")
+    if len(s) < 80:
+        return True
+    if normalize_text(s) == normalize_text(t):
+        return True
+    if is_youtube_url(summary):
+        return True
+    return False
+
+
+def build_base_summary_text(title: str, summary: str, article_text: str = ""):
+    parts = []
+
     title = clean_news_text(title)
     summary = clean_news_text(summary)
+    article_text = clean_news_text(article_text)
 
-    combined = f"{title}. {summary}".strip()
+    if title:
+        parts.append(title)
+
+    if summary and normalize_text(summary) != normalize_text(title):
+        parts.append(summary)
+
+    if article_text:
+        parts.append(article_text)
+
+    combined = ". ".join(parts)
+    combined = clean_news_text(combined)
+    return combined
+
+
+def make_english_summary(title, summary, article_text=""):
+    combined = build_base_summary_text(title, summary, article_text)
     sentences = extract_useful_sentences(combined, limit=4)
 
     if not sentences:
-        return shorten_text(title, 300)
+        return shorten_text(clean_news_text(title), 300)
 
     final_text = " ".join(sentences)
-    return shorten_text(final_text, 500)
+    return shorten_text(final_text, 700)
 
 
-def make_bangla_summary(title, summary, source_name):
-    english = make_english_summary(title, summary)
-    translated = shorten_text(to_bangla(english), 900)
+def make_bangla_summary(title, summary, source_name, article_text=""):
+    english = make_english_summary(title, summary, article_text)
+    translated = shorten_text(to_bangla(english), 1200)
 
     category = classify_news(title, summary, source_name)
 
@@ -552,6 +674,8 @@ def build_pending_caption(item):
     link = item.get("link", "").strip()
     idx = item.get("pending_index", "?")
     mode = item.get("mode", "review")
+    article_text = item.get("article_text", "")
+    is_yt = bool(item.get("is_youtube"))
 
     if is_breaking_news(title, summary):
         header = "🚨 PENDING: ব্রেকিং নিউজ"
@@ -564,6 +688,9 @@ def build_pending_caption(item):
         else:
             header = "📱 PENDING: Tech"
 
+    bangla_summary = make_bangla_summary(title, summary, source_name, article_text)
+    article_preview = shorten_text(clean_news_text(article_text), 450)
+
     parts = [
         header,
         f"ID: {idx}",
@@ -571,10 +698,28 @@ def build_pending_caption(item):
         "",
         f"Title: {title}",
         "",
-        make_bangla_summary(title, summary, source_name),
+        bangla_summary,
+    ]
+
+    if article_preview:
+        parts.extend([
+            "",
+            "Extracted details:",
+            article_preview,
+        ])
+
+    if is_yt:
+        parts.extend([
+            "",
+            "⚠️ YouTube item detected.",
+            "এইটা direct post কোরো না যদি summary weak হয়।",
+            "Best way: pending post-এ reply দিয়ে তোমার নিজের summary/caption লিখে দাও, তারপর /approve দাও।"
+        ])
+
+    parts.extend([
         "",
         f"Source: {source_name}",
-    ]
+    ])
 
     if link:
         parts.append(link)
@@ -585,10 +730,15 @@ def build_pending_caption(item):
         f"/approve {idx}",
         f"/reject {idx}",
         f"/skip {idx}",
-        f"/editcaption {idx} তোমার নতুন caption",
+        f"/editcaption {idx} তোমার final caption",
+        f"/editsummary {idx} তোমার final caption",
+        "",
+        "Tip:",
+        "pending message-এ reply দিয়ে plain text পাঠালেও সেটা custom caption হিসেবে save হবে।",
     ])
 
-    return "\n".join(parts)
+    full_text = "\n".join(parts)
+    return shorten_text(full_text, 4000)
 
 
 def build_public_caption(item):
@@ -596,6 +746,7 @@ def build_public_caption(item):
     summary = clean_news_text(item.get("summary", ""))
     source_name = strip_html(item.get("source_name", "Unknown Source"))
     link = item.get("link", "").strip()
+    article_text = item.get("article_text", "")
 
     if item.get("custom_caption"):
         custom = clean_news_text(item["custom_caption"])
@@ -613,7 +764,7 @@ def build_public_caption(item):
 
         return "\n\n".join(parts)
 
-    bangla_summary = make_bangla_summary(title, summary, source_name)
+    bangla_summary = make_bangla_summary(title, summary, source_name, article_text)
 
     if is_breaking_news(title, summary):
         header = "🚨 ব্রেকিং নিউজ"
@@ -648,7 +799,9 @@ def build_public_caption(item):
 def generate_reel_script(item):
     title = clean_news_text(item.get("title", ""))
     summary = clean_news_text(item.get("summary", ""))
-    short_summary = shorten_text(summary, 180)
+    article_text = clean_news_text(item.get("article_text", ""))
+    base = build_base_summary_text(title, summary, article_text)
+    short_summary = shorten_text(base, 180)
 
     return (
         "🎥 REELS SCRIPT\n\n"
@@ -667,7 +820,8 @@ def format_pending_list(items):
         title = shorten_text(clean_news_text(item.get("title", "")), 90)
         source = strip_html(item.get("source_name", "Unknown"))
         mode = item.get("mode", "review")
-        lines.append(f"{idx}. [{mode}] {title}\n   Source: {source}")
+        tag = " [YT]" if item.get("is_youtube") else ""
+        lines.append(f"{idx}. [{mode}]{tag} {title}\n   Source: {source}")
 
     return "\n".join(lines[:40])
 
@@ -749,14 +903,13 @@ def is_probably_video_link(link: str):
 # FEED FETCH
 # =========================================================
 def fetch_feed_entries(source_name: str, source_url: str):
-    headers = {"User-Agent": "Mozilla/5.0 NewsBot/3.0"}
-    response = requests.get(source_url, timeout=25, headers=headers)
+    response = requests.get(source_url, timeout=25, headers=HTTP_HEADERS)
     response.raise_for_status()
     parsed = feedparser.parse(response.content)
     return getattr(parsed, "entries", [])
 
 
-def source_requires_review(source: dict, title: str, summary: str):
+def source_requires_review(source: dict, title: str, summary: str, link: str):
     if source.get("mode") == "review":
         return True
 
@@ -764,6 +917,9 @@ def source_requires_review(source: dict, title: str, summary: str):
     url = source.get("url", "").lower()
 
     if "facebook" in src_name or "facebook" in url:
+        return True
+
+    if is_youtube_url(link) or is_youtube_source_name(source.get("name", "")):
         return True
 
     if len(strip_html(summary)) < 60:
@@ -834,30 +990,48 @@ def fetch_rss_candidates():
                 continue
             if is_similar_title(title, pending_titles):
                 continue
-            if not is_valid_news(title, summary, source_name):
+
+            article_text = ""
+            if not is_youtube_url(link):
+                if is_summary_too_weak(title, summary):
+                    article_text = fetch_article_text_from_url(link)
+                else:
+                    domain = get_domain_from_url(link)
+                    if domain and domain not in {"youtube.com", "youtu.be"}:
+                        extra = fetch_article_text_from_url(link)
+                        if len(extra) > len(summary):
+                            article_text = extra
+
+            final_summary_source = build_base_summary_text(title, summary, article_text)
+
+            if not is_valid_news(title, final_summary_source, source_name):
                 continue
 
             image_url = extract_image(entry)
             video_url = extract_video_url(entry)
+            is_yt = is_youtube_url(link) or is_youtube_source_name(source_name)
 
             out.append({
                 "title": title,
                 "summary": summary if summary else "Latest update from the source.",
+                "article_text": article_text,
                 "link": link,
                 "source_name": source_name,
                 "image_url": image_url,
                 "video_url": video_url,
-                "score": score_news(title, summary, source_name),
+                "score": score_news(title, final_summary_source, source_name),
                 "status": "pending",
                 "custom_caption": None,
                 "attached_type": None,
                 "attached_file_id": None,
-                "mode": "review" if source_requires_review(source, title, summary) else "auto",
+                "mode": "review" if source_requires_review(source, title, final_summary_source, link) else "auto",
                 "source_slug": source.get("slug"),
                 "created_at": now_iso(),
                 "approved_at": None,
                 "rejected_at": None,
                 "skipped_at": None,
+                "admin_message_id": None,
+                "is_youtube": is_yt,
             })
 
     return out, debug_errors
@@ -899,6 +1073,7 @@ def fetch_facebook_source_candidates():
                     "access_token": FB_PAGE_TOKEN,
                 },
                 timeout=30,
+                headers=HTTP_HEADERS,
             )
             page_resp.raise_for_status()
             page_name = page_resp.json().get("name", f"Facebook Page {page_id}")
@@ -921,6 +1096,7 @@ def fetch_facebook_source_candidates():
                     "access_token": FB_PAGE_TOKEN,
                 },
                 timeout=30,
+                headers=HTTP_HEADERS,
             )
             resp.raise_for_status()
             data = resp.json().get("data", [])
@@ -959,6 +1135,7 @@ def fetch_facebook_source_candidates():
                 out.append({
                     "title": title,
                     "summary": summary,
+                    "article_text": "",
                     "link": permalink,
                     "source_name": f"{page_name} (Facebook)",
                     "image_url": image_url,
@@ -974,6 +1151,8 @@ def fetch_facebook_source_candidates():
                     "approved_at": None,
                     "rejected_at": None,
                     "skipped_at": None,
+                    "admin_message_id": None,
+                    "is_youtube": False,
                 })
 
         except Exception as e:
@@ -1020,7 +1199,7 @@ def fb_post_text(message: str, link: str):
         "access_token": FB_PAGE_TOKEN
     }
 
-    response = requests.post(url, data=payload, timeout=60)
+    response = requests.post(url, data=payload, timeout=60, headers=HTTP_HEADERS)
 
     if response.ok:
         return {"ok": True, "data": response.json()}
@@ -1042,7 +1221,8 @@ def fb_post_photo(file_path: str, caption: str):
             url,
             data={"caption": caption, "access_token": FB_PAGE_TOKEN},
             files={"source": f},
-            timeout=120
+            timeout=120,
+            headers=HTTP_HEADERS
         )
 
     if response.ok:
@@ -1065,7 +1245,8 @@ def fb_post_video(file_path: str, caption: str):
             url,
             data={"description": caption, "access_token": FB_PAGE_TOKEN},
             files={"source": f},
-            timeout=300
+            timeout=300,
+            headers=HTTP_HEADERS
         )
 
     if response.ok:
@@ -1141,7 +1322,7 @@ async def publish_item(app: Application, item: dict):
             caption=caption[:1024]
         )
     else:
-        await bot.send_message(chat_id=PUBLIC_CHANNEL_ID, text=caption)
+        await bot.send_message(chat_id=PUBLIC_CHANNEL_ID, text=caption[:4000])
 
     if FB_ENABLE_PUBLISH:
         fb_result = fb_post_text(caption, item["link"])
@@ -1189,7 +1370,7 @@ async def update_admin_pending_message(bot, item):
             await bot.edit_message_text(
                 chat_id=ADMIN_CHAT_ID,
                 message_id=item["admin_message_id"],
-                text=caption,
+                text=caption[:4000],
             )
     except Exception:
         pass
@@ -1219,9 +1400,11 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/approve@{bot_name} 1\n"
         f"/reject@{bot_name} 1\n"
         f"/skip@{bot_name} 1\n"
-        f"/editcaption@{bot_name} 1 তোমার নতুন caption\n\n"
+        f"/editcaption@{bot_name} 1 তোমার নতুন caption\n"
+        f"/editsummary@{bot_name} 1 তোমার নতুন caption\n\n"
         "Reply mode:\n"
-        "Pending post-এ reply করে /approve বা /skip দাও।"
+        "Pending post-এ reply করে plain text পাঠালে সেটা custom caption হিসেবে save হবে।\n"
+        "তারপর /approve দিলেই publish হবে।"
     )
 
 
@@ -1238,10 +1421,12 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sources = load_sources()
     enabled = [s for s in sources if s.get("enabled", True)]
     disabled = [s for s in sources if not s.get("enabled", True)]
+    yt_pending = [x for x in pending if x.get("is_youtube")]
 
     await update.message.reply_text(
         "📊 Queue status:\n"
         f"Pending: {len(pending)}\n"
+        f"Pending YouTube: {len(yt_pending)}\n"
         f"Approved: {len(approved)}\n"
         f"Rejected: {len(rejected)}\n"
         f"Skipped: {len(skipped)}\n"
@@ -1281,7 +1466,7 @@ async def review_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if item.get("image_url"):
         await update.message.reply_photo(photo=item["image_url"], caption=text[:1024])
     else:
-        await update.message.reply_text(text)
+        await update.message.reply_text(text[:4000])
 
 
 async def approved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1420,6 +1605,38 @@ async def editcaption_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_admin_pending_message(context.bot, item)
 
 
+async def editsummary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin_user(update.effective_user.id):
+        return
+
+    queue = load_queue()
+    item = None
+    new_caption = ""
+
+    if update.message and update.message.reply_to_message:
+        item = find_pending_by_reply(queue, update.message.reply_to_message.message_id)
+        raw = update.message.text or ""
+        new_caption = re.sub(r"^/editsummary(?:@\w+)?", "", raw).strip()
+    else:
+        idx, text = extract_index_and_text(update.message.text or "", "editsummary")
+        if idx is not None:
+            item = find_pending_by_index(idx)
+            new_caption = text
+
+    if not item:
+        await update.message.reply_text("Pending item পাইনি। Use: /editsummary 1 তোমার final লেখা")
+        return
+
+    if not new_caption:
+        await update.message.reply_text("Use: /editsummary 1 তোমার final লেখা")
+        return
+
+    item["custom_caption"] = new_caption
+    save_queue(queue)
+    await update.message.reply_text("✏️ Final summary saved.")
+    await update_admin_pending_message(context.bot, item)
+
+
 async def addsource_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not is_admin_user(update.effective_user.id):
         return
@@ -1442,6 +1659,9 @@ async def addsource_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if mode not in {"auto", "review"}:
         mode = "auto"
+
+    if is_youtube_url(url) or is_youtube_source_name(name):
+        mode = "review"
 
     sources = load_sources()
     sources.append({
@@ -1562,7 +1782,7 @@ async def listsources_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("")
         lines.append(f"Facebook source pages: {', '.join(FB_SOURCE_PAGE_IDS) if FB_SOURCE_PAGE_IDS else 'none'}")
 
-    await update.message.reply_text("Current sources:\n\n" + "\n".join(lines[:100]))
+    await update.message.reply_text("Current sources:\n\n" + "\n".join(lines[:3500]))
 
 
 async def sourceerrors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1588,7 +1808,7 @@ async def sourceerrors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No source errors.")
         return
 
-    await update.message.reply_text("Source errors:\n\n" + "\n\n".join(lines))
+    await update.message.reply_text("Source errors:\n\n" + "\n\n".join(lines[:3500]))
 
 
 async def fetchnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1632,6 +1852,32 @@ async def media_attach_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
 
+async def reply_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin_user(update.effective_user.id):
+        return
+    if not update.message or not update.message.reply_to_message:
+        return
+    if not update.message.text:
+        return
+
+    queue = load_queue()
+    item = find_pending_by_reply(queue, update.message.reply_to_message.message_id)
+    if not item:
+        return
+
+    text = (update.message.text or "").strip()
+    if not text:
+        return
+
+    if text.startswith("/"):
+        return
+
+    item["custom_caption"] = text
+    save_queue(queue)
+    await update.message.reply_text("✏️ Reply text saved as final caption.")
+    await update_admin_pending_message(context.bot, item)
+
+
 # =========================================================
 # COLLECT
 # =========================================================
@@ -1643,6 +1889,9 @@ async def collect_now(app: Application):
     debug_lines = [f"Candidates found: {len(candidates)}"]
 
     for cand in candidates:
+        if cand.get("is_youtube"):
+            cand["mode"] = "review"
+
         if cand.get("mode") == "auto":
             try:
                 fb_result = await publish_item(app, cand)
@@ -1670,7 +1919,7 @@ async def collect_now(app: Application):
         if cand.get("image_url"):
             sent = await app.bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=cand["image_url"], caption=text[:1024])
         else:
-            sent = await app.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
+            sent = await app.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text[:4000])
 
         cand["admin_message_id"] = sent.message_id
         queue.append(cand)
@@ -1768,6 +2017,7 @@ def main():
     app.add_handler(CommandHandler("reject", reject_cmd))
     app.add_handler(CommandHandler("skip", skip_cmd))
     app.add_handler(CommandHandler("editcaption", editcaption_cmd))
+    app.add_handler(CommandHandler("editsummary", editsummary_cmd))
     app.add_handler(CommandHandler("addsource", addsource_cmd))
     app.add_handler(CommandHandler("removesource", removesource_cmd))
     app.add_handler(CommandHandler("enablesource", enablesource_cmd))
@@ -1776,7 +2026,9 @@ def main():
     app.add_handler(CommandHandler("listsources", listsources_cmd))
     app.add_handler(CommandHandler("sourceerrors", sourceerrors_cmd))
     app.add_handler(CommandHandler("fetchnow", fetchnow_cmd))
+
     app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO), media_attach_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reply_text_handler))
 
     app.run_polling()
 
